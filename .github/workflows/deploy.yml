@@ -1,0 +1,61 @@
+name: Deploy to Cloudflare Pages
+
+# Requires two repository secrets (Settings > Secrets and variables > Actions):
+#   CLOUDFLARE_API_TOKEN  - token with "Cloudflare Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID - from the Cloudflare dashboard sidebar
+#
+# Without those secrets this workflow fails at the deploy step; the build and
+# checks still run, so it doubles as CI.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run check
+
+      - name: Build
+        run: bun run build
+
+      - name: Verify the engine still compresses
+        run: bun run test:engine
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Cloudflare Pages
+        id: deployment
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy build --project-name=qcompress --branch=main

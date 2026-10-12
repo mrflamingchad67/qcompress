@@ -1,0 +1,7 @@
+# Normalise line endings to LF in the repository.
+# Windows checkouts get CRLF, which would otherwise leak into the Linux build.
+* text=auto eol=lf
+
+# The vendored QPDF glue and binary are already normalised.
+src/lib/vendors/qpdf.js -text
+src/lib/vendors/qpdf.wasm binary
