@@ -113,11 +113,30 @@ console.log('[1] initial render');
 	check('dropzone is the primary element', await page.isVisible('.drop-title'));
 	check('no options before a file is chosen', !(await page.isVisible('fieldset.options')));
 	check('no result before processing', !(await page.isVisible('.result')));
-	// Nothing that would imply a second page / marketing sections
-	const links = await page.$$eval('a', (as) => as.map((a) => a.getAttribute('href')).filter(Boolean));
-	check('no navigation links', links.length === 0, links.join(', '));
+	// Only one link is allowed on the page: the source link in the footer.
+	// No navigation, marketing or cross-links.
+	const links = await page.$$eval('a', (as) =>
+		as.map((a) => ({ href: a.getAttribute('href'), text: a.textContent?.trim() }))
+	);
+	check(
+		'only the source link exists',
+		links.length === 1 && links[0].href === 'https://github.com/mrflamingchad67/qcompress',
+		JSON.stringify(links)
+	);
+	check('source link opens safely', await page.$eval('a.source', (a) => a.rel === 'noopener noreferrer'));
+
 	const bodyText = (await page.textContent('body')) ?? '';
 	check('no FAQ/About sections', !/frequently asked|about us|how it works|testimonials|pricing/i.test(bodyText));
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[1b] footer');
+{
+	const { page, context } = await newPage();
+	check('copyright shown', /©\s*\d{4},\s*mrflamingchad67/.test((await page.textContent('.meta')) ?? ''));
+	check('source link present', await page.isVisible('a.source'));
+	check('source link labelled', (await page.textContent('a.source'))?.trim() === 'Source');
 	await context.close();
 }
 

@@ -6,6 +6,7 @@
 	import {
 		CircleAlert,
 		CircleCheck,
+		Code,
 		Download,
 		FileText,
 		FileUp,
@@ -20,6 +21,10 @@
 
 	const MAX_BYTES = 200 * 1024 * 1024; // 200 MB
 	const ACCEPT = 'application/pdf,.pdf';
+
+	const author = 'mrflamingchad67';
+	const repoUrl = 'https://github.com/mrflamingchad67/qcompress';
+	const year = new Date().getFullYear();
 
 	type Phase = 'empty' | 'ready' | 'working' | 'done';
 
@@ -444,35 +449,45 @@
 </main>
 
 <!-- ── file tray ───────────────────────────────────────────────────────── -->
-<footer class="tray">
-	{#if file}
-		<div class="chip-file">
-			<FileText size={14} strokeWidth={2} aria-hidden="true" />
-			<span class="chip-name" title={file.name}>{file.name}</span>
-			<span class="chip-size">{formatBytes(file.size)}</span>
-			<button
-				type="button"
-				class="link file-row"
-				onclick={resetAll}
-				disabled={busy}
-				aria-label="Remove file"
-			>
-				<X size={13} strokeWidth={2} aria-hidden="true" />
-			</button>
-		</div>
-	{:else}
-		<p class="tray-empty">No file selected</p>
-	{/if}
+<footer class="footer">
+	<div class="tray">
+		{#if file}
+			<div class="chip-file">
+				<FileText size={14} strokeWidth={2} aria-hidden="true" />
+				<span class="chip-name" title={file.name}>{file.name}</span>
+				<span class="chip-size">{formatBytes(file.size)}</span>
+				<button
+					type="button"
+					class="link file-row"
+					onclick={resetAll}
+					disabled={busy}
+					aria-label="Remove file"
+				>
+					<X size={13} strokeWidth={2} aria-hidden="true" />
+				</button>
+			</div>
+		{:else}
+			<p class="tray-empty">No file selected</p>
+		{/if}
+	</div>
+
+	<div class="meta">
+		<span>&copy; {year}, {author}</span>
+		<a class="source" href={repoUrl} target="_blank" rel="noopener noreferrer">
+			<Code size={12} strokeWidth={2} aria-hidden="true" />
+			Source
+		</a>
+	</div>
 </footer>
 
 <style>
 	/* ── shell ───────────────────────────────────────────────────────── */
 	.panel {
-		min-height: calc(100vh - 49px);
+		min-height: calc(100vh - 49px - 33px);
 		display: flex;
 		flex-direction: column;
 		gap: 0.625rem;
-		padding: 1.5rem 0.75rem 3.5rem;
+		padding: 1.5rem 0.75rem 5rem;
 	}
 
 	/* Empty state mirrors the reference: wordmark + one dashed card, centred. */
@@ -480,7 +495,7 @@
 		align-items: center;
 		justify-content: center;
 		gap: 1.125rem;
-		padding-bottom: 4rem;
+		padding-bottom: 6rem;
 	}
 
 	.wordmark {
@@ -966,18 +981,49 @@
 		min-width: 0;
 	}
 
-	/* ── tray ────────────────────────────────────────────────────────── */
-	.tray {
+	/* ── footer: file tray + meta bar ────────────────────────────────── */
+	.footer {
 		position: fixed;
 		inset: auto 0 0 0;
 		z-index: 10;
+	}
+
+	.tray {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 		min-height: 49px;
 		padding: 0.5rem 0.75rem;
 		background: var(--bg-tray);
+	}
+
+	.meta {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--bg-tray);
 		border-top: 1px solid var(--border);
+		color: var(--text-tertiary);
+		font-size: 0.75rem;
+	}
+
+	.source {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3125rem;
+		color: var(--text-secondary);
+		text-decoration: none;
+	}
+
+	.source:hover {
+		color: var(--primary);
+		text-decoration: underline;
+	}
+
+	.source :global(svg) {
+		flex: none;
 	}
 
 	.tray-empty {
@@ -1021,7 +1067,7 @@
 	/* ── responsive ──────────────────────────────────────────────────── */
 	@media (max-width: 40rem) {
 		.panel {
-			padding: 1rem 0.75rem 4rem;
+			padding: 1rem 0.75rem 5.5rem;
 		}
 
 		.drop {
