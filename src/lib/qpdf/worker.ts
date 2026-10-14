@@ -18,11 +18,13 @@
  */
 
 import wasmUrl from '#lib/vendors/qpdf.wasm?url';
-import { buildArgs } from './options';
+import { optimize, type ImageCodec, type QualityMode } from './pipeline';
+import { detach as detachBytes } from './bytes';
 import type { InspectResult, ProcessResult, WorkerRequest, WorkerResponse } from './protocol';
 
 /** qpdf exit statuses (see `--help=exit-status`). */
 const EXIT_OK = 0;
+const EXIT_WARN = 3;
 const EXIT_ERROR = 2;
 
 type QpdfModule = {
@@ -149,7 +151,12 @@ let wasmCacheInstalled = false;
 /**
  * Make `fetch(<our wasm url>)` resolve from the in-memory cache.
  *
- * Scoped to this module's own binary; every other request passes through.
+ * Scoped by **exact URL**, not by extension. This worker also lazily loads the
+ * jSquash JPEG codec, which fetches its *own* `.wasm` files (mozjpeg_enc,
+ * squoosh_resize, …). Matching on `.wasm` would hand every one of them the QPDF
+ * binary, the codec would fail to instantiate, and the lossy modes would
+ * silently do nothing at all. Every other request passes through untouched.
+ *
  * Emscripten uses `instantiateStreaming`, so the synthetic Response must carry
  * the `application/wasm` content type.
  */
@@ -159,6 +166,14 @@ function installWasmCache(): void {
 
 	const passthrough = self.fetch.bind(self);
 
+	// Absolute URL of the QPDF binary, so a relative request still matches.
+	let qpdfWasmUrl: string;
+	try {
+		qpdfWasmUrl = new URL(wasmUrl, self.location.href).href;
+	} catch {
+		qpdfWasmUrl = wasmUrl;
+	}
+
 	self.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url =
 			typeof input === 'string'
@@ -167,7 +182,14 @@ function installWasmCache(): void {
 					? input.href
 					: (input as Request).url;
 
-		if (url.endsWith('.wasm') && wasmBinary) {
+		let absolute: string;
+		try {
+			absolute = new URL(url, self.location.href).href;
+		} catch {
+			absolute = url;
+		}
+
+		if (wasmBinary && absolute === qpdfWasmUrl) {
 			return new Response(wasmBinary, {
 				headers: { 'content-type': 'application/wasm' }
 			});
@@ -203,33 +225,9 @@ async function loadQpdf(): Promise<{ mod: QpdfModule; output: Output }> {
 	return { mod, output };
 }
 
-/**
- * Run `callMain` with the console sinks temporarily redirected.
- *
- * @deprecated superseded by the module-level capture in installConsoleCapture().
- */
-function runCapturedLegacy(mod: QpdfModule, args: string[], output: Output): number {
-	const consoleOut: string[] = [];
-	const consoleErr: string[] = [];
-	const join = (parts: unknown[]) => parts.map((p) => String(p)).join(' ') + '\n';
-
-	const orig = { log: console.log, error: console.error, warn: console.warn, info: console.info };
-	console.log = (...a: unknown[]) => void consoleOut.push(join(a));
-	console.error = (...a: unknown[]) => void consoleErr.push(join(a));
-	console.warn = (...a: unknown[]) => void consoleErr.push(join(a));
-	console.info = (...a: unknown[]) => void consoleOut.push(join(a));
-
-	try {
-		return mod.callMain(args);
-	} finally {
-		Object.assign(console, orig);
-		output.stdout.push(...consoleOut);
-		output.stderr.push(...consoleErr);
-	}
-}
-
-function cleanup(mod: QpdfModule, ...paths: string[]) {
+function cleanup(mod: QpdfModule, ...paths: (string | null | undefined)[]) {
 	for (const p of paths) {
+		if (!p) continue;
 		try {
 			mod.FS.unlink(p);
 		} catch {
@@ -240,9 +238,100 @@ function cleanup(mod: QpdfModule, ...paths: string[]) {
 
 /** Copy out of the WASM heap so we never transfer or alias Emscripten memory. */
 function detach(view: Uint8Array): Uint8Array<ArrayBuffer> {
-	const copy = new Uint8Array(new ArrayBuffer(view.length));
-	copy.set(view);
-	return copy;
+	return detachBytes(view);
+}
+
+/**
+ * The JPEG codec, loaded on demand.
+ *
+ * Lossless mode never touches an image, so it never downloads the codec - the
+ * dependency is only fetched when the visitor picks a lossy mode *and* the
+ * document actually contains JPEG images.
+ *
+ * `@jsquash/jpeg` uses named exports but `@jsquash/resize` exposes its function
+ * as the default export; importing `resize` by name yields undefined and every
+ * downscale throws.
+ */
+let codecPromise: Promise<ImageCodec> | null = null;
+
+async function loadCodec(): Promise<ImageCodec> {
+	if (codecPromise) return codecPromise;
+
+	const build = async (): Promise<ImageCodec> => {
+		const [{ decode, encode }, resizeModule] = await Promise.all([
+			import('@jsquash/jpeg'),
+			import('@jsquash/resize')
+		]);
+		const resize = resizeModule.default;
+
+		// Hand the codecs a standalone ArrayBuffer: a view that aliases a
+		// larger buffer makes them read past the end of the image.
+		const toBuffer = (u8: Uint8Array): ArrayBuffer =>
+			u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength
+				? (u8.buffer as ArrayBuffer)
+				: (u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer);
+
+		return {
+			decode: (jpeg: Uint8Array) => decode(toBuffer(jpeg)),
+			// jSquash takes an options object, and returns an ArrayBuffer.
+			encode: async (image: ImageData, quality: number) =>
+				new Uint8Array(await encode(image, { quality })),
+			resize: (image: ImageData, width: number, height: number) =>
+				resize(image, { width, height })
+		};
+	};
+
+	codecPromise = build();
+	return codecPromise;
+}
+
+/**
+ * A QpdfRunner bound to this worker's WASM build and the caller's password.
+ *
+ * The pipeline builds argv but never credentials: the password is written to
+ * the in-memory filesystem here and referenced by `--password-file`, so it is
+ * never part of a command line, never logged, and never leaves the worker.
+ */
+function makeRunner(password: string) {
+	return async (
+		bytes: Uint8Array,
+		args: string[]
+	): Promise<{ code: number; out: Uint8Array | null; diagnostics: string }> => {
+		const { mod, output } = await loadQpdf();
+		const inFile = tmpName('in', '.pdf');
+		const passFile = password ? tmpName('pw', '.txt') : null;
+		// A check must never write anything, and qpdf wants no output file.
+		const isCheck = args.includes('--check');
+		const outFile = tmpName('out', '.pdf');
+
+		try {
+			mod.FS.writeFile(inFile, bytes);
+
+			const argv = [...args];
+			if (passFile) {
+				mod.FS.writeFile(passFile, new TextEncoder().encode(password));
+				argv.push(`--password-file=${passFile}`);
+				if (!isCheck) argv.push('--decrypt');
+			}
+			argv.push(inFile);
+			if (!isCheck) argv.push(outFile);
+
+			post({ id: -1, kind: 'status', stage: 'Optimising structure' });
+			const code = runCaptured(mod, argv, output);
+			const diagnostics = [...output.stderr, ...output.stdout].join('\n');
+
+			if (isCheck || (code !== EXIT_OK && code !== EXIT_WARN)) {
+				return { code, out: null, diagnostics };
+			}
+			try {
+				return { code, out: detach(mod.FS.readFile(outFile)), diagnostics };
+			} catch {
+				return { code, out: null, diagnostics };
+			}
+		} finally {
+			cleanup(mod, inFile, isCheck ? null : outFile, passFile);
+		}
+	};
 }
 
 /**
@@ -348,81 +437,86 @@ async function inspect(buffer: ArrayBuffer): Promise<InspectResult> {
 	}
 }
 
+/**
+ * Run the orchestrator.
+ *
+ * The pipeline generates several candidates, validates each one, and returns
+ * the smallest that passes - or the original bytes untouched when nothing
+ * beats them. A zero-gain result is a legitimate outcome and is reported as
+ * such rather than dressed up as a success.
+ */
 async function process(
 	buffer: ArrayBuffer,
-	options: Parameters<typeof buildArgs>[0],
+	mode: QualityMode,
 	password: string
 ): Promise<ProcessResult> {
 	const input = new Uint8Array(buffer);
-	const { mod, output } = await loadQpdf();
-	const inFile = tmpName('in', '.pdf');
-	const outFile = tmpName('out', '.pdf');
-	let passFile: string | null = null;
+	const run = makeRunner(password);
+
+	// A password is only meaningful if qpdf could not open the file on its own.
+	// Probe first so an incorrect password is reported as such instead of
+	// surfacing later as a confusing "no candidate improved this file".
+	if (password) {
+		const probe = await run(input, ['--check']);
+		if (probe.code === EXIT_ERROR) {
+			return {
+				ok: false,
+				exitCode: probe.code,
+				bytes: null,
+				size: 0,
+				detail: /invalid password/i.test(probe.diagnostics)
+					? 'Incorrect password.'
+					: firstMeaningfulLine(probe.diagnostics.split('\n')) ?? 'QPDF could not open the file.',
+				invalidPassword: /invalid password/i.test(probe.diagnostics),
+				strategy: 'none',
+				lossy: false,
+				fallback: false,
+				imagesProcessed: 0,
+				imagesReplaced: 0,
+				durationMs: 0
+			};
+		}
+	}
 
 	try {
-		mod.FS.writeFile(inFile, input);
-
-		const args = buildArgs(options);
-
-		if (password) {
-			passFile = tmpName('pw', '.txt');
-			// Password is written to the in-memory FS only, never to disk.
-			mod.FS.writeFile(passFile, new TextEncoder().encode(password));
-			args.push('--password-file=' + passFile);
-			if (options.mode === 'compress') args.push('--decrypt');
+		// The codec is only needed for the lossy modes; a lossless run never
+		// downloads it. If it fails to load the run still succeeds, but the
+		// user is told why no image was re-encoded rather than being shown a
+		// silent "nothing changed".
+		let codec: ImageCodec | null = null;
+		let codecError: string | null = null;
+		if (mode !== 'lossless') {
+			try {
+				codec = await loadCodec();
+			} catch (err) {
+				codecError = err instanceof Error ? err.message : String(err);
+				console.warn('[qcompress] JPEG codec unavailable:', codecError);
+			}
 		}
 
-		args.push(inFile, outFile);
-
-		post({ id: -1, kind: 'status', stage: 'Compressing' });
-		const exitCode = runCaptured(mod, args, output);
-
-		if (exitCode === EXIT_ERROR) {
-			const { detail, invalidPassword } = diagnose(output);
-			return {
-				ok: false,
-				exitCode,
-				bytes: null,
-				size: 0,
-				detail,
-				invalidPassword
-			};
-		}
-
-		let result: Uint8Array<ArrayBuffer>;
-		try {
-			result = detach(mod.FS.readFile(outFile));
-		} catch {
-			return {
-				ok: false,
-				exitCode,
-				bytes: null,
-				size: 0,
-				detail: diagnose(output).detail ?? 'QPDF produced no output file.',
-				invalidPassword: false
-			};
-		}
-
-		// Sanity check: refuse to hand back something that is not a PDF.
-		const header = new TextDecoder('latin1').decode(result.subarray(0, 5));
-		if (header !== '%PDF-') {
-			return {
-				ok: false,
-				exitCode,
-				bytes: null,
-				size: 0,
-				detail: 'Output was not a valid PDF.',
-				invalidPassword: false
-			};
-		}
+		const result = await optimize(
+			{
+				bytes: input,
+				mode,
+				progress: (stage) => post({ id: -1, kind: 'status', stage })
+			},
+			run,
+			codec
+		);
 
 		return {
 			ok: true,
-			exitCode,
-			bytes: result.buffer,
-			size: result.length,
+			exitCode: EXIT_OK,
+			bytes: result.bytes.slice().buffer as ArrayBuffer,
+			size: result.bytes.length,
 			detail: null,
-			invalidPassword: false
+			invalidPassword: false,
+			strategy: result.strategy,
+			lossy: result.lossy,
+			fallback: result.fallback,
+			imagesProcessed: result.imagesProcessed,
+			imagesReplaced: result.imagesReplaced,
+			durationMs: result.durationMs
 		};
 	} catch (err) {
 		return {
@@ -431,10 +525,14 @@ async function process(
 			bytes: null,
 			size: 0,
 			detail: err instanceof Error ? err.message : String(err),
-			invalidPassword: false
+			invalidPassword: false,
+			strategy: 'none',
+			lossy: false,
+			fallback: false,
+			imagesProcessed: 0,
+			imagesReplaced: 0,
+			durationMs: 0
 		};
-	} finally {
-		cleanup(mod, inFile, outFile, ...(passFile ? [passFile] : []));
 	}
 }
 
@@ -449,7 +547,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 		}
 
 		if (msg.kind === 'process') {
-			const result = await process(msg.buffer, msg.options, msg.password);
+			const result = await process(msg.buffer, msg.mode, msg.password);
 			post(
 				{ id: msg.id, kind: 'process', result },
 				result.bytes ? [result.bytes] : []

@@ -104,8 +104,33 @@ async function compress(page) {
 	await page.waitForSelector('.result, .error', { timeout: 180_000 });
 }
 
+/** The engine's own account of what it did, read back off the result panel. */
+async function report(page) {
+	return page.evaluate(() => {
+		const rows = [...document.querySelectorAll('.report li')];
+		return Object.fromEntries(
+			rows.map((li) => [
+				li.querySelector('.report-key')?.textContent?.trim(),
+				li.querySelector('.report-val')?.textContent?.trim()
+			])
+		);
+	});
+}
+
+/** Output size in bytes, parsed from the "Processed" row. */
+async function processedBytes(page) {
+	return page.evaluate(() => {
+		const dd = [...document.querySelectorAll('.sizes dd')][1]?.textContent ?? '';
+		const m = dd.match(/([\d.,]+)\s*(B|KB|MB)/i);
+		if (!m) return null;
+		const n = parseFloat(m[1].replace(',', ''));
+		const unit = m[2].toUpperCase();
+		return Math.round(n * (unit === 'KB' ? 1024 : unit === 'MB' ? 1048576 : 1));
+	});
+}
+
 // ---------------------------------------------------------------------------
-console.log('[1] initial render');
+console.log('\n[1] initial render');
 {
 	const { page, context } = await newPage();
 	check('title', (await page.title()) === 'PDF Compressor');
@@ -345,15 +370,99 @@ console.log('\n[8] WASM is lazy-loaded (not fetched on initial page load)');
 }
 
 // ---------------------------------------------------------------------------
-console.log('\n[9] warm engine issues no further requests');
+console.log('\n[9] a warm engine is offline; the codec is fetched at most once');
 {
 	const { page, context, requests } = await newPage();
-	await selectPdf(page, textPdf(3, 10), 'warm.pdf'); // engine loads here
+	await selectPdf(page, textPdf(3, 10), 'warm.pdf'); // QPDF engine loads here
 	const baseline = requests.length;
+
+	// First compression. QPDF is already warm, but Balanced is a lossy mode,
+	// so the JPEG codec is fetched lazily on first use. That is a one-off.
 	await compress(page);
-	const after = requests.slice(baseline);
-	check('compression on a warm engine is fully offline', after.length === 0, after.join(', '));
+	const first = requests.slice(baseline);
+	check('first compression loads the codec at most once per chunk', new Set(first).size === first.length, first.join(', '));
+	check('first compression does not refetch the QPDF binary', !first.some((u) => u.endsWith('.wasm')), first.join(', '));
 	check('result produced', await page.isVisible('.result'));
+
+	// Every engine dependency is now resident, so a second run must be silent.
+	const beforeSecond = requests.length;
+	await page.click('button.secondary:has-text("Compress another")');
+	await selectPdf(page, textPdf(3, 10), 'warm2.pdf');
+	await compress(page);
+	const second = requests.slice(beforeSecond);
+	check('compression on a fully warm engine is offline', second.length === 0, second.join(', '));
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[9b] lossless mode never downloads the JPEG codec');
+{
+	const { page, context, requests } = await newPage();
+	await selectPdf(page, textPdf(3, 10), 'lossless.pdf');
+	const baseline = requests.length;
+
+	await page.click('.chip:has-text("Lossless")');
+	await compress(page);
+
+	const after = requests.slice(baseline);
+	// Lossless cannot re-encode an image, so the codec must stay unbundled-off.
+	check('lossless run fetches no codec chunk', after.every((u) => u.endsWith('.wasm')), after.join(', '));
+	check('lossless run produced a result', await page.isVisible('.result'));
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[9c] the three modes are real behavioural differences');
+{
+	// A real JPEG photo, so the lossy modes have something to re-encode.
+	// scripts/lib/fixtures.mjs only builds Flate images, which are never
+	// touched by the image path.
+	const photo = new Uint8Array(await readFile(path.join(here, 'fixtures', 'photo-q90.pdf')));
+
+	const { page, context } = await newPage();
+	await selectPdf(page, photo, 'photo.pdf');
+
+	check('mode selector offers exactly three modes', (await page.$$('.chip')).length === 3);
+
+	await page.click('.chip:has-text("Lossless")');
+	await compress(page);
+	const lossless = await report(page);
+	const losslessSize = await processedBytes(page);
+
+	check(
+		'lossless is reported as leaving images unchanged',
+		lossless.Images === 'unchanged as-is',
+		lossless.Images
+	);
+
+	await page.click('button.secondary:has-text("Compress another")');
+	await selectPdf(page, photo, 'photo.pdf');
+	await page.click('.chip:has-text("Maximum")');
+	await compress(page);
+	const maximum = await report(page);
+	const maximumSize = await processedBytes(page);
+
+	check(
+		'maximum reports re-encoding images',
+		/re-encoded/.test(maximum.Images ?? ''),
+		maximum.Images
+	);
+	check(
+		'maximum is smaller than lossless on a photo',
+		maximumSize !== null && losslessSize !== null && maximumSize < losslessSize,
+		`maximum=${maximumSize} lossless=${losslessSize}`
+	);
+	check(
+		'each run names the method it used',
+		!!lossless.Method && !!maximum.Method,
+		`${lossless.Method} / ${maximum.Method}`
+	);
+	check(
+		'the lossy run says so',
+		(lossless.Method ?? '') !== (maximum.Method ?? ''),
+		`${lossless.Method} / ${maximum.Method}`
+	);
+
 	await context.close();
 }
 

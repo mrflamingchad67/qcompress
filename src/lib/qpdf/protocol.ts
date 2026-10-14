@@ -4,7 +4,7 @@
  * Kept as plain structured-clone messages: no Comlink, no runtime dependency.
  */
 
-import type { CompressOptions } from './options';
+import type { QualityMode } from './pipeline';
 
 export interface InspectResult {
 	/** qpdf could open the document without a password. */
@@ -28,11 +28,22 @@ export interface ProcessResult {
 	detail: string | null;
 	/** True when qpdf told us the problem was the password. */
 	invalidPassword: boolean;
+	/** Which strategy won: structural, linearize, dedupe, image-aware... */
+	strategy: string;
+	/** True when images were re-encoded, i.e. the result is lossy. */
+	lossy: boolean;
+	/** True when nothing beat the original and the input was returned as-is. */
+	fallback: boolean;
+	/** Images examined and how many were actually rewritten. */
+	imagesProcessed: number;
+	imagesReplaced: number;
+	/** Wall-clock time for the whole run. */
+	durationMs: number;
 }
 
 export type WorkerRequest =
 	| { id: number; kind: 'inspect'; buffer: ArrayBuffer }
-	| { id: number; kind: 'process'; buffer: ArrayBuffer; options: CompressOptions; password: string };
+	| { id: number; kind: 'process'; buffer: ArrayBuffer; mode: QualityMode; password: string };
 
 export type WorkerResponse =
 	| { id: number; kind: 'ready' }

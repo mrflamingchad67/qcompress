@@ -15,9 +15,9 @@
 		X
 	} from '@lucide/svelte';
 	import { engine, type ProgressStage } from '#lib/qpdf/client';
-	import { DEFAULT_OPTIONS, type CompressOptions, type Mode } from '#lib/qpdf/options';
+	import { MODE_ATTEMPTS, type QualityMode } from '#lib/qpdf/pipeline';
 	import { formatBytes, formatDelta, formatPercent, outputName } from '#lib/format';
-	import type { InspectResult } from '#lib/qpdf/protocol';
+	import type { InspectResult, ProcessResult } from '#lib/qpdf/protocol';
 
 	const MAX_BYTES = 200 * 1024 * 1024; // 200 MB
 	const ACCEPT = 'application/pdf,.pdf';
@@ -28,15 +28,33 @@
 
 	type Phase = 'empty' | 'ready' | 'working' | 'done';
 
+	/** What each mode actually does, shown verbatim under the selector. */
+	const MODE_NOTES: Record<QualityMode, string> = {
+		lossless:
+			'Restructures the file and removes duplicated streams. Images and text are left exactly as they are — nothing is re-encoded, so nothing can degrade.',
+		balanced:
+			'Lossless work first, then re-encodes JPEG photos at a high quality. Text stays sharp; photographic detail is slightly reduced.',
+		maximum:
+			'Lossless work first, then re-encodes images harder and reduces oversized scans. Smallest file, clearly the most visible quality loss.'
+	};
+
+	const MODES: { id: QualityMode; label: string }[] = [
+		{ id: 'lossless', label: 'Lossless' },
+		{ id: 'balanced', label: 'Balanced' },
+		{ id: 'maximum', label: 'Maximum' }
+	];
+
 	let phase = $state<Phase>('empty');
 	let file = $state<File | null>(null);
-	let options = $state<CompressOptions>({ ...DEFAULT_OPTIONS });
+	let mode = $state<QualityMode>('balanced');
 	let info = $state<InspectResult | null>(null);
 	let password = $state('');
 	let stage = $state<ProgressStage>('idle');
+	let detail = $state<string>('');
 	let error = $state<string | null>(null);
 	let dragging = $state(false);
 
+	let result = $state<ProcessResult | null>(null);
 	let downloadUrl = $state<string | null>(null);
 	let downloadName = $state('');
 	let inSize = $state(0);
@@ -49,13 +67,18 @@
 	const saved = $derived(inSize - outSize);
 	const reduced = $derived(outSize < inSize);
 	const unchanged = $derived(outSize === inSize);
+
+	/** True when the file cannot be shrunk and was returned untouched. */
+	const noGain = $derived(!!result?.fallback);
+	const lossy = $derived(!!result?.lossy);
+
 	const statusLine = $derived(
 		stage === 'loading'
 			? 'Loading QPDF engine…'
 			: stage === 'inspecting'
 				? 'Reading document…'
 				: stage === 'compressing'
-					? 'Compressing…'
+					? detail || 'Compressing…'
 					: ''
 	);
 
@@ -67,6 +90,8 @@
 		error = null;
 		password = '';
 		stage = 'idle';
+		detail = '';
+		result = null;
 		downloadUrl = null;
 		downloadName = '';
 		inSize = 0;
@@ -120,24 +145,29 @@
 	async function compress() {
 		if (!file || busy) return;
 		error = null;
+		result = null;
 		phase = 'working';
 		try {
-			const result = await engine.process(options, password, (s) => (stage = s));
+			const res = await engine.process(mode, password, (s) => {
+				stage = s;
+				if (s === 'compressing') detail = '';
+			});
 
-			if (!result.ok || !result.bytes) {
-				error = describeFailure(result.invalidPassword, result.detail);
+			if (!res.ok || !res.bytes) {
+				error = describeFailure(res.invalidPassword, res.detail);
 				phase = 'ready';
 				return;
 			}
 
-			const blob = new Blob([result.bytes], { type: 'application/pdf' });
+			const blob = new Blob([res.bytes], { type: 'application/pdf' });
 			const url = URL.createObjectURL(blob);
 			engine.adoptResultUrl(url);
 
+			result = res;
 			downloadUrl = url;
 			downloadName = outputName(file.name);
 			inSize = file.size;
-			outSize = result.size;
+			outSize = res.size;
 			phase = 'done';
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
@@ -162,8 +192,18 @@
 		URL.revokeObjectURL(url);
 	}
 
-	function setMode(mode: Mode) {
-		options = { ...options, mode };
+	function setMode(next: QualityMode) {
+		mode = next;
+	}
+
+	/** Turn an internal strategy name into something worth reading. */
+	function strategyLabel(strategy: string): string {
+		const s = strategy.toLowerCase();
+		if (s.includes('dedupe')) return 'duplicate streams removed';
+		if (s.includes('image')) return 'images re-encoded and duplicates removed';
+		if (s.includes('linearize')) return 'restructured for web viewing';
+		if (s.includes('structural')) return 'structure optimised';
+		return strategy;
 	}
 
 	onDestroy(() => engine.destroy());
@@ -278,85 +318,34 @@
 		<fieldset class="options" disabled={busy}>
 			<legend class="visually-hidden">Compression settings</legend>
 
-			<p class="section-label">Settings</p>
+			<p class="section-label">Mode</p>
 
 			<div class="chips" role="radiogroup" aria-label="Processing mode">
-				<label class="chip">
-					<input
-						type="radio"
-						name="mode"
-						value="compress"
-						checked={options.mode === 'compress'}
-						onchange={() => setMode('compress')}
-					/>
-					<span>Compress</span>
-				</label>
-				<label class="chip">
-					<input
-						type="radio"
-						name="mode"
-						value="linearize"
-						checked={options.mode === 'linearize'}
-						onchange={() => setMode('linearize')}
-					/>
-					<span>Web optimize</span>
-				</label>
+				{#each MODES as m (m.id)}
+					<label class="chip">
+						<input
+							type="radio"
+							name="mode"
+							value={m.id}
+							checked={mode === m.id}
+							onchange={() => setMode(m.id)}
+						/>
+						<span>{m.label}</span>
+					</label>
+				{/each}
 			</div>
 
-			{#if options.mode === 'compress'}
-				<div class="grid">
-					<label class="opt">
-						<span class="opt-label">Object streams</span>
-						<select bind:value={options.objectStreams}>
-							<option value="generate">Generate</option>
-							<option value="preserve">Preserve</option>
-							<option value="disable">Disable</option>
-						</select>
-					</label>
+			<p class="hint">{MODE_NOTES[mode]}</p>
 
-					<label class="opt">
-						<span class="opt-label">Compression level</span>
-						<select bind:value={options.compressionLevel}>
-							{#each [9, 6, 3, 1, 0] as level (level)}
-								<option value={level}>{level === 0 ? '0 (none)' : level}</option>
-							{/each}
-						</select>
-					</label>
-
-					<label class="opt">
-						<span class="opt-label">Stream data</span>
-						<select bind:value={options.streamData}>
-							<option value="compress">Compress</option>
-							<option value="preserve">Preserve</option>
-							<option value="uncompress">Uncompress</option>
-						</select>
-					</label>
-
-					<label class="opt">
-						<span class="opt-label">Decode level</span>
-						<select bind:value={options.decodeLevel}>
-							<option value="generalized">Generalized</option>
-							<option value="all">All</option>
-							<option value="specialized">Specialized</option>
-							<option value="none">None</option>
-						</select>
-					</label>
-
-					<label class="opt check">
-						<input type="checkbox" bind:checked={options.recompressFlate} />
-						<span class="opt-label">Recompress Flate streams</span>
-					</label>
-				</div>
-
-				<p class="hint">
-					Structural compression only. Images and text are never rasterised, downsampled or
-					re-encoded.
+			{#if mode === 'lossless'}
+				<p class="hint mode-tag">Nothing is ever degraded in this mode.</p>
+			{:else if MODE_ATTEMPTS[mode].length > 1}
+				<p class="hint mode-tag">
+					Both a stronger and a lighter setting are tried; whichever produces the smaller
+					valid file is kept.
 				</p>
 			{:else}
-				<p class="hint">
-					Restructures the file for fast web viewing. This usually makes the file slightly
-					larger.
-				</p>
+				<p class="hint mode-tag">Images are re-encoded — quality is traded for size.</p>
 			{/if}
 		</fieldset>
 	{/if}
@@ -415,6 +404,35 @@
 				</p>
 			{/if}
 
+			<!-- What the engine actually did, not what was asked for. -->
+			{#if result}
+				<ul class="report">
+					<li>
+						<span class="report-key">Mode</span>
+						<span class="report-val">{MODES.find((m) => m.id === mode)?.label}</span>
+					</li>
+					<li>
+						<span class="report-key">Images</span>
+						<span class="report-val">
+							{#if lossy && result.imagesReplaced > 0}
+								{result.imagesReplaced} of {result.imagesProcessed} re-encoded (lossy)
+							{:else}
+								unchanged as-is
+							{/if}
+						</span>
+					</li>
+					<li>
+						<span class="report-key">Method</span>
+						<span class="report-val">
+							{noGain ? 'no strategy improved this file — original returned' : strategyLabel(result.strategy)}
+						</span>
+					</li>
+				</ul>
+				<p class="hint">
+					Rewriting a PDF invalidates any digital signature it carried.
+				</p>
+			{/if}
+
 			<dl class="sizes">
 				<div>
 					<dt>Original</dt>
@@ -448,10 +466,12 @@
 	{/if}
 </main>
 
-<!-- ── file tray ───────────────────────────────────────────────────────── -->
+<!-- ── file tray + meta bar ───────────────────────────────────────────── -->
 <footer class="footer">
-	<div class="tray">
-		{#if file}
+	<!-- The tray only exists once there is a file to show; there is no
+	     placeholder row taking up space on an empty page. -->
+	{#if file}
+		<div class="tray">
 			<div class="chip-file">
 				<FileText size={14} strokeWidth={2} aria-hidden="true" />
 				<span class="chip-name" title={file.name}>{file.name}</span>
@@ -466,10 +486,8 @@
 					<X size={13} strokeWidth={2} aria-hidden="true" />
 				</button>
 			</div>
-		{:else}
-			<p class="tray-empty">No file selected</p>
-		{/if}
-	</div>
+		</div>
+	{/if}
 
 	<div class="meta">
 		<span>&copy; {year}, {author}</span>
@@ -483,11 +501,17 @@
 <style>
 	/* ── shell ───────────────────────────────────────────────────────── */
 	.panel {
-		min-height: calc(100vh - 49px - 33px);
+		/* The meta bar is always present; the file tray only appears once a
+		   file is loaded, so it is not reserved for on an empty page. */
+		min-height: calc(100vh - 33px);
 		display: flex;
 		flex-direction: column;
 		gap: 0.625rem;
 		padding: 1.5rem 0.75rem 5rem;
+	}
+
+	.panel:not(.empty) {
+		min-height: calc(100vh - 49px - 33px);
 	}
 
 	/* Empty state mirrors the reference: wordmark + one dashed card, centred. */
@@ -731,62 +755,45 @@
 		font-weight: 500;
 	}
 
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
-		gap: 0.375rem;
-	}
-
-	.opt {
-		display: flex;
-		flex-direction: column;
-		justify-content: center;
-		gap: 0.25rem;
-		min-height: 3.25rem;
-		padding: 0.5rem 0.625rem;
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-	}
-
-	.opt:hover {
-		background: var(--bg-alt-hover);
-		border-color: var(--border-strong);
-	}
-
-	.opt-label {
-		color: var(--text-secondary);
-		font-size: 0.6875rem;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-
-	.opt select {
-		padding: 0.25rem 0.375rem;
-		background: var(--bg-input);
-		border: 1px solid var(--border-strong);
-		border-radius: 4px;
-		font-size: 0.8125rem;
-	}
-
-	.opt.check {
-		flex-direction: row;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.opt.check .opt-label {
-		text-transform: none;
-		letter-spacing: 0;
-		font-size: 0.8125rem;
-		color: var(--text-primary);
-	}
-
 	.hint {
 		margin: 0.75rem 0 0;
 		color: var(--text-tertiary);
 		font-size: 0.75rem;
+	}
+
+	.hint.mode-tag {
+		margin-top: 0.25rem;
+		color: var(--text-secondary);
+	}
+
+	/* Honest summary of what the engine actually did. */
+	.report {
+		display: grid;
+		gap: 0.25rem;
+		margin: 0.25rem 0 0;
+		padding: 0.625rem 0.75rem;
+		background: var(--bg-alt);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		list-style: none;
+		font-size: 0.75rem;
+	}
+
+	.report li {
+		display: flex;
+		gap: 0.5rem;
+		justify-content: space-between;
+	}
+
+	.report-key {
+		color: var(--text-secondary);
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+	}
+
+	.report-val {
+		color: var(--text-primary);
+		text-align: right;
 	}
 
 	.field {
@@ -1024,12 +1031,6 @@
 
 	.source :global(svg) {
 		flex: none;
-	}
-
-	.tray-empty {
-		margin: 0;
-		color: var(--text-tertiary);
-		font-size: 0.8125rem;
 	}
 
 	.chip-file {

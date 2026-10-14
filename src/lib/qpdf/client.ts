@@ -9,7 +9,7 @@
  *  - release object URLs when they are replaced
  */
 
-import type { CompressOptions } from './options';
+import type { QualityMode } from './pipeline';
 import type { InspectResult, ProcessResult, WorkerRequest, WorkerResponse } from './protocol';
 
 export type ProgressStage = 'idle' | 'loading' | 'inspecting' | 'compressing';
@@ -90,30 +90,19 @@ export class QpdfEngine {
 		}
 	}
 
-	/** Run qpdf. The worker's bytes are a copy; our original is never touched. */
+	/** Run the orchestrator. The worker's bytes are a copy; our original is never touched. */
 	async process(
-		options: CompressOptions,
+		mode: QualityMode,
 		password: string,
 		onStatus?: (s: ProgressStage) => void
 	): Promise<ProcessResult> {
 		if (!this.#original) throw new Error('No file loaded');
 
-		// Svelte 5 `$state` objects are proxies and cannot be structured-cloned,
-		// so send an explicit plain object across the worker boundary.
-		const plainOptions: CompressOptions = {
-			mode: options.mode,
-			objectStreams: options.objectStreams,
-			compressionLevel: Number(options.compressionLevel),
-			recompressFlate: !!options.recompressFlate,
-			streamData: options.streamData,
-			decodeLevel: options.decodeLevel
-		};
-
 		const copy = this.#original.slice();
 		onStatus?.('compressing');
 		try {
 			return await this.#call<ProcessResult>(
-				(id) => ({ id, kind: 'process', buffer: copy.buffer, options: plainOptions, password }),
+				(id) => ({ id, kind: 'process', buffer: copy.buffer, mode, password }),
 				(res) => {
 					if (res.kind !== 'process') throw new Error('Unexpected worker response');
 					return res.result;
