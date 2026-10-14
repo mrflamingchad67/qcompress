@@ -6,13 +6,20 @@
  *   - a PDF can be selected and really compressed
  *   - the downloaded bytes are a genuine, smaller PDF
  *   - displayed sizes match the measured bytes
+ *   - the lazily-loaded JPEG codec serves correctly from the CDN (wrong MIME
+ *     type or a bad cache rule only shows up in production)
+ *   - the lossy modes really re-encode, not just run silently
  *   - no request ever carries document bytes
  *
  * Usage: bun scripts/test-live.mjs [url]
  */
 import { chromium } from 'playwright';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { textPdf } from './lib/fixtures.mjs';
 
+const here = path.dirname(fileURLToPath(import.meta.url));
 const BASE = process.argv[2] ?? 'https://qcompress.pages.dev';
 
 let passed = 0,
@@ -84,6 +91,47 @@ check(
 	`${sizes[1]} vs ${out.length}`
 );
 check('savings reported', /Saved/.test((await page.textContent('.verdict')) ?? ''), await page.textContent('.verdict'));
+
+// --- the lazy codec actually works from the CDN ------------------------------
+// A wrong MIME type, a broken cache rule, or a wasm-cache interceptor scoped by
+// extension instead of URL would all pass every local test and still leave the
+// lossy modes doing nothing in production. This is the only place that is
+// caught.
+const photo = new Uint8Array(await readFile(path.join(here, 'fixtures', 'photo-q90.pdf')));
+
+await page.click('button.secondary:has-text("Compress another")');
+await page.setInputFiles('input[type=file]', {
+	name: 'live-photo.pdf',
+	mimeType: 'application/pdf',
+	buffer: Buffer.from(photo)
+});
+await page.waitForSelector('button.primary:has-text("Compress PDF")', { timeout: 120_000 });
+await page.waitForSelector('.panel[data-stage="idle"]', { timeout: 120_000 });
+
+const wasmSeen = [];
+page.on('response', async (r) => {
+	if (r.url().endsWith('.wasm')) {
+		wasmSeen.push({ url: r.url().split('/').pop(), type: r.headers()['content-type'] });
+	}
+});
+
+await page.click('.chip:has-text("Maximum")');
+await page.click('button.primary:has-text("Compress PDF")');
+await page.waitForSelector('.result', { timeout: 240_000 });
+
+check('codec wasm served with application/wasm', wasmSeen.length > 1 && wasmSeen.every((w) => /application\/wasm/.test(w.type)), JSON.stringify(wasmSeen));
+check('more than one wasm fetched (QPDF + codec)', new Set(wasmSeen.map((w) => w.url)).size > 1, JSON.stringify(wasmSeen.map((w) => w.url)));
+
+const photos = await page.$$eval('.sizes dd', (ds) => ds.map((d) => d.textContent?.trim() ?? ''));
+const reportRows = await page.$$eval('.report li', (ls) =>
+	ls.map((li) => ({
+		key: li.querySelector('.report-key')?.textContent?.trim(),
+		value: li.querySelector('.report-val')?.textContent?.trim()
+	}))
+);
+const imagesRow = reportRows.find((r) => r.key === 'Images')?.value ?? '';
+check('live lossy mode reports re-encoding images', /re-encoded/.test(imagesRow), imagesRow);
+check('live lossy mode actually shrank the photo', toBytes(photos[1]) < photo.length, `${photos[1]} vs ${photo.length}`);
 
 // --- privacy: nothing but same-origin static assets ------------------------
 const offenders = requests.filter((u) => {
