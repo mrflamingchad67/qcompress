@@ -18,8 +18,9 @@ function zlibFlate(text) {
  * offsets correctly.
  *
  * @param {Array<{dict: string, stream?: string|Uint8Array|null}>} objects
+ * @param {{header?: string, info?: string, extraTrailer?: string}} [opts]
  */
-function build(objects, { header = '%PDF-1.7' } = {}) {
+export function build(objects, { header = '%PDF-1.7', info = null, extraTrailer = '' } = {}) {
 	const chunks = [];
 	let pos = 0;
 	const push = (buf) => {
@@ -29,6 +30,11 @@ function build(objects, { header = '%PDF-1.7' } = {}) {
 	};
 
 	push(header + '\n%\xE2\xE3\xCF\xD3\n');
+
+	// The trailer needs /Info's object number, so it is allocated after the
+	// caller-supplied objects.
+	const infoNum = info ? objects.length + 1 : null;
+	if (infoNum) objects = [...objects, { dict: info }];
 
 	const offsets = [];
 	objects.forEach((obj, i) => {
@@ -55,7 +61,10 @@ function build(objects, { header = '%PDF-1.7' } = {}) {
 	let xref = `xref\n0 ${n}\n0000000000 65535 f \n`;
 	for (const o of offsets) xref += `${String(o).padStart(10, '0')} 00000 n \n`;
 	push(xref);
-	push(`trailer\n<< /Size ${n} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`);
+	push(
+		`trailer\n<< /Size ${n} /Root 1 0 R${infoNum ? ` /Info ${infoNum} 0 R` : ''}${extraTrailer} >>\n` +
+			`startxref\n${xrefPos}\n%%EOF\n`
+	);
 
 	const total = chunks.reduce((a, b) => a + b.length, 0);
 	const out = new Uint8Array(total);

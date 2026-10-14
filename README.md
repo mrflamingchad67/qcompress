@@ -98,9 +98,28 @@ Two details that are easy to get wrong and are handled explicitly:
 | Text / vector content | **Never rasterised** |
 | Image alpha | `/SMask` objects are never re-encoded; transparency survives |
 | CMYK JPEGs | **Skipped** — Adobe APP14 inversion is not handled, so they are left alone rather than corrupted |
-| 1/2/4-bit images | **Skipped** (only 8-bit RGB and grayscale are re-encoded) |
+| Non-8-bit images | **Skipped** |
+| Non-JPEG images | **Skipped** — Flate, JPX, JBIG2 and CCITT are never routed through the JPEG encoder |
+| ICC profiles with `/N 4` | **Skipped** — could be CMYK, same reason |
 | Forms, annotations, bookmarks, attachments, metadata | Preserved |
 | Digital signatures | **Invalidated** by any rewrite — the UI says so |
+
+### Which image encodings can be re-encoded
+
+A JPEG is re-encoded when **all** of these hold:
+
+| Condition | Why |
+| --- | --- |
+| `/Filter /DCTDecode` | It is a JPEG at all |
+| `/Filter [/FlateDecode /DCTDecode]` | Stored bytes are a **Flate-compressed** JPEG; unwrapped first, re-wrapped after |
+| `/BitsPerComponent 8` | Anything else is a different data layout |
+| `/ColorSpace /DeviceRGB` or `/DeviceGray` | Directly known |
+| `/ColorSpace [/ICCBased n 0 R]` with `/N 3` (or 1) | The profile says how three components are *interpreted*, not what they are; it stays valid after the JPEG is replaced |
+| …with `/N 4`, or no `/N` | Cannot be shown to be RGB, so it is left alone |
+
+Anything not matching is **left byte-identical**, and the result panel now says
+*why* ("3 images left alone: ICCBased colour space") rather than the unhelpful
+"unchanged as-is".
 
 > Deduplication deliberately excludes page **content streams**. Two pages can
 > carry byte-identical content that draws different things, because the
@@ -129,66 +148,134 @@ neither does a lossy run on a document with no JPEG images.
 
 ## Verified numbers
 
-Measured by `bun run bench` over eight generated fixtures (real JPEG/PNG bytes
-produced by Chromium's canvas encoder, committed under `scripts/fixtures/`).
-Each row is the full orchestrator, not a single qpdf call, and every output was
-independently re-validated with `qpdf --check`.
+Measured by `bun run bench` over the committed fixture corpus (37 PDFs; see
+[scripts/FIXTURES.md](scripts/FIXTURES.md)). Every output is independently
+re-validated with `qpdf --check`, and the three deliberately-invalid fixtures
+are **excluded from the totals** rather than counted as wins.
 
-| Fixture | In | Lossless | Balanced | Maximum |
-| --- | --- | --- | --- | --- |
-| `alpha-smask.pdf` (Flate + soft mask) | 573,171 | −1.0% | −1.0% | −1.0% |
-| `graphic-q75.pdf` (2 identical images) | 51,848 | −49.3% | −51.4% | −63.2% |
-| `oversized-600dpi.pdf` (one big photo) | 715,622 | 0.0% | −38.8% | −72.4% |
-| `photo-flate-p0.pdf` | 50,640 | 0.0% | 0.0% | 0.0% |
-| `photo-flate-p1.pdf` | 50,640 | 0.0% | 0.0% | 0.0% |
-| `photo-q35.pdf` | 17,340 | 0.0% | −25.8% | −25.8% |
-| `photo-q90.pdf` | 44,093 | 0.0% | −63.2% | −73.9% |
-| `scan-300dpi-q80.pdf` (3 identical pages) | 1,617,635 | −66.6% | −72.8% | −87.8% |
-| **Total** | **3,120,989** | **−35.55%** | **−48.75%** | **−64.52%** |
+| Mode | In | Out | Reduction | Smaller | Unchanged | Larger | Failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Lossless | 3,487,746 | 2,377,285 | **31.84%** | 12 | 24 | 0 | 4 |
+| Balanced | 3,487,746 | 1,876,857 | **46.19%** | 22 | 15 | 0 | 3 |
+| Maximum | 3,487,746 | 1,343,414 | **61.48%** | 22 | 15 | 0 | 3 |
 
-Two rows deserve attention because they are the honest ones:
+(The four Lossless "failures" against three for the others is `jpeg-corrupt.pdf`:
+`qpdf --check` decodes DCTDecode streams, so Lossless's validation of the
+*original* rejects it before any strategy runs. The lossy modes touch the image
+and the candidate is discarded for being larger. Either way it is correctly
+never counted as a win.)
 
-* **`photo-flate-*.pdf` save nothing in any mode.** They hold a single Flate
-  image with no duplicates; there is no lossless move, and the lossy path does
-  not apply to non-JPEG images. The engine returns the original bytes and says
-  "No size reduction achieved". This is the correct outcome, not a bug.
-* **`oversized-600dpi.pdf` saves nothing in Lossless** for the same reason —
-  one image, no duplicates, nothing to restructure. It is the fixture that
-  isolates what each mode actually contributes.
+These are **byte-weighted** (total in vs total out), not a mean of per-file
+percentages — which matters, because `scan-300dpi` alone is ~46% of the corpus.
+For tiny files a few hundred bytes swings the percentage hard, which is why the
+counts of unchanged files are reported next to the headline number.
 
-The `scan-300dpi` Lossless row is the headline for lossless work: three pages
-carrying the *same* 538 KB scan collapse to one copy, losing no pixels at all.
+`bun run bench` prints the breakdown per fixture, including which strategy won
+and why any candidate was rejected. It also reports elapsed time, but that is an
+informal single run, not a benchmark.
 
-### Before this work
+### Two rows that are 0% on purpose
 
-The previous engine was a single `qpdf` structural pass. Over the same fixtures
-it produced **0.15%**, and made **5 of 8 files larger**. The earlier README
-numbers in this project (~90% on some inputs) came from malformed fixtures
-missing `/Filter /DCTDecode`; they were wrong and have been removed.
+`photo-flate-p0/p1.pdf` hold a single Flate image with no duplicates. There is
+no lossless move, and the lossy path does not apply to non-JPEG images. The
+engine returns the original bytes and says "No size reduction achieved". Same
+for `jpeg-cmyk-declared`, `jpeg-bpc1`, `jpeg-icc` and `jpeg-icc-cmyk`, which
+exist precisely to prove unsupported images are left alone.
+
+## Real-document bugs this stage found
+
+Running the engine against a real 32-page document (3.05 MB, images 93.7% of the
+file) exposed two defects that no synthetic fixture had:
+
+1. **`/Filter [/FlateDecode /DCTDecode]` was never decoded.** Filters apply left
+   to right, so what is stored is the output of the *first* filter — a
+   **Flate-compressed JPEG**. The engine fed those bytes to the JPEG decoder,
+   every decode failed, and the run reported "images unchanged". All 33 images
+   were skipped.
+2. **ICC-tagged RGB was excluded.** `/ColorSpace [/ICCBased n 0 R]` with `/N 3`
+   describes RGB data; the policy accepted only the literal names
+   `DeviceRGB`/`DeviceGray`. 31 of 34 images were discarded for no safety reason.
+
+Fixing them, plus a third bug found on the way (a backwards search for `<<`
+grabbed a nested `/DecodeParms` dictionary, so `/Length` was never updated and
+the stream was corrupted), moved that document from **1.1% to 49.7%**:
+
+| | Before | After |
+| --- | --- | --- |
+| Size | 3,048,657 B | 1,534,266 B |
+| Reduction | 1.1% | **49.7%** |
+| Images re-encoded | 0 of 33 | 33 of 33 |
+
+The browser has no `zlib`, so the unwrapping uses the platform's native
+`CompressionStream` / `DecompressionStream` — no dependency, no bundle weight.
+Both paths have dedicated browser tests.
+
+### Before the orchestrator
+
+The engine before this was a single `qpdf` structural pass: **0.15%** over the
+same fixtures, and it made **5 of 8 files larger**.
 
 | | Before | After (lossless) |
 | --- | --- | --- |
-| Total reduction | 0.15% | 35.55% |
-| Fixtures that got larger | 5 of 8 | 0 of 8 |
+| Total reduction | 0.15% | 31.84% |
+| Fixtures that got larger | 5 of 8 | 0 of 37 |
 | Strategies tried | 1 | up to 6 |
 
 ---
 
 ## Test suite
 
-| Command | What it covers |
-| --- | --- |
-| `bun run check` | Type checking, zero warnings |
-| `bun run test:engine` | QPDF behaviour, options, exit codes, size arithmetic |
-| `bun run test:pipeline` | **42 assertions**: mode honesty, validation, page preservation, lossless pixel-identity, image decodability, mode ordering, candidate selection |
-| `bun run test:browser` | Real Chromium: UI, privacy, lazy loading, mode behaviour |
-| `bun run test:live` | The deployed site end-to-end |
-| `bun run bench` | The numbers in the table above |
+| Command | What it covers | Result |
+| --- | --- | --- |
+| `bun run check` | Type checking | 0 errors, 0 warnings |
+| `bun run test:engine` | QPDF behaviour, options, exit codes | 32 passed, 5 skipped |
+| `bun run test:pipeline` | Orchestrator contracts on the savings corpus | 42 passed |
+| `bun run test:integrity` | **288 assertions** across all 37 fixtures | 288 passed |
+| `bun run test:fidelity` | **57 raster comparisons**, decoded pixels | 56 passed |
+| `bun run test:browser` | Real Chromium: UI, privacy, lazy loading, modes, wrapped/ICC images | 72 passed |
+| `bun run test:live` | The deployed site | 16 passed |
+| `bun run bench` | The numbers above | — |
 
-The pipeline suite is the one that matters most. Among other things it asserts
-that **Lossless mode never alters a single image payload** — it compares every
-JPEG in the output byte-for-byte against the input, which is a stronger claim
-than "the file is smaller" or "the file validates".
+The 5 skips in `test:engine` are QPDF diagnostics assertions that need a runtime
+intercepting stdout. Bun cannot (the glue links nodefs), so they are covered by
+the browser suite instead.
+
+### What "integrity" actually means here
+
+Three dimensions are kept apart, because passing one says nothing about the
+others:
+
+**Structural validity** — every output passes `%PDF-`, `%%EOF` and a real
+`qpdf --check`, and its page tree is readable with the right page count.
+
+**Semantic preservation** — `src/lib/qpdf/structure.ts` reads the catalog, page
+tree, per-page geometry and rotation, annotation subtypes and link targets,
+outline titles, form field names and metadata, and `scripts/lib/compare.mjs`
+compares input against output. Lossless is asserted to change none of it.
+
+> Object numbers are never compared. QPDF renumbers freely, and a changed
+> object number is not a defect; a missing page or a lost link is.
+
+**Visual fidelity** — `test-fidelity.mjs` decodes the image as it was in the
+input and as it is in the output and compares the raster: mean absolute error,
+worst single-channel difference, and the share of channels differing by more
+than 32. Lossless is asserted **pixel-identical**, not merely close.
+
+### What is *not* verified
+
+Stated plainly rather than glossed over:
+
+* **No page-level rendering.** There is no PDF rasteriser in this toolchain, and
+  adding one purely for tests was judged not worth the dependency. Visual
+  checks therefore cover *images*, not composed pages: font rendering, text
+  positioning and page compositing are not compared visually. To check by hand,
+  run `bun run explain <file.pdf>` then open both files side by side.
+* **Extractable text is not compared.** Content streams are never rewritten, so
+  the risk is low, but it is not asserted.
+* **Digital signatures are not tested**, only disclosed as invalidated.
+* Optional content (layers) has no fixture; it is unverified.
+* Thresholds in `test-fidelity.mjs` are **regression bounds**, not a
+  perceptual-quality score. A number below does not mean "looks acceptable".
 
 ---
 
@@ -237,7 +324,7 @@ Every candidate must pass before it is allowed to win:
 4. **lossy candidates are excluded from Lossless mode** — enforced at the point
    the candidate is created, and re-asserted when selecting the winner
 
-`scripts/test-pipeline.mjs` proves rule 4 is real rather than decorative: it
+`scripts/test/test-pipeline.mjs` proves rule 4 is real rather than decorative: it
 wraps the runner so that the `structural` strategy returns a truncated file,
 then asserts that candidate is marked invalid, that it was *not* selected, and
 that the file that was returned still validates.
@@ -294,7 +381,7 @@ status and page count) rather than treating a clean check as a guarantee.
   the WASM in-memory filesystem are unlinked in a `finally` block.
 * Document bytes never appear in URLs, logs or the DOM.
 
-`scripts/test-browser.mjs` asserts the privacy property directly: it records
+`scripts/test/test-browser.mjs` asserts the privacy property directly: it records
 every network request and fails if a *second* compression issues any request.
 
 ---
@@ -308,8 +395,9 @@ every network request and fails if a *second* compression issues any request.
   alone in every mode. Lossless has no way to shrink an already-compressed
   format, and re-encoding the others would need decoders this build does not
   carry.
-* **CMYK JPEGs are skipped.** Adobe APP14 colour inversion is not handled, so
-  they are left untouched rather than risking corrupted colours.
+* **CMYK JPEGs are skipped**, and so are ICC profiles with four components. The
+  re-encode would have to reproduce Adobe's APP14 inversion exactly, and getting
+  it wrong silently swaps colours.
 * **Downscaling uses a pixel cap, not true DPI.** Maximum caps the long edge at
   1700 px rather than parsing the content stream for the placement matrix. That
   is safe and predictable, but it is a fixed rule, not a resolution-aware one.
@@ -320,12 +408,15 @@ every network request and fails if a *second* compression issues any request.
   Image re-encoding holds one decoded raster at a time, but a very large scan
   can still exhaust device memory. Failures are reported, not swallowed.
 * **Slow on many large images.** Re-encoding three 1240×1754 scans takes ~12 s
-  in Chromium on this machine. The UI shows an indeterminate bar because no
-  honest percentage is available.
+  in Chromium on this machine; a 32-page, 33-image document took **26 s** on the
+  deployed site. The UI shows an indeterminate bar because no honest percentage
+  is available.
+* **No page-level visual regression testing** — see § "What is not verified".
 * **Password entry is not persisted** — it is held in a worker variable only
   for the duration of one operation.
-* Requires WebAssembly and Web Worker support. Without them the app shows a
-  plain message rather than a broken interface.
+* Requires WebAssembly, Web Worker and (for Flate-wrapped images) Compression
+  Streams. Where the last is missing those images are skipped safely rather than
+  mangled.
 
 ---
 
@@ -429,9 +520,10 @@ src/
     format.ts              byte/delta/percent formatting
     qpdf/
       pipeline.ts          the orchestrator: candidates, validation, selection
-      images.ts            JPEG XObject discovery + byte-level replacement
+      images.ts            JPEG XObject discovery, eligibility, byte replacement
       dedupe.ts            lossless duplicate-stream collapse
       xref.ts              object scanning + cross-reference rebuilding
+      structure.ts         read-only PDF reader (pages, annots, outlines, forms)
       bytes.ts             latin1 <-> bytes (no Buffer/TextDecoder)
       options.ts           the verified option set -> qpdf argv
       protocol.ts          worker message types
@@ -446,16 +538,22 @@ src/
     +layout.ts             ssr = false, prerender = true
     +page.svelte           the entire interface
 scripts/
-  lib/fixtures.mjs         generated PDF fixtures
-  fixtures/                eight committed PDF fixtures (real JPEG/PNG bytes)
-  engine.mjs               QPDF runner + jSquash codec for Node/Bun tests
-  make-fixtures.mjs        regenerates scripts/fixtures
-  probe-*.mjs              engine investigations
-  bench-pipeline.mjs       the orchestrator over every fixture and mode
-  bench.mjs                the old single-pass engine, for comparison
-  test-pipeline.mjs        engine integrity suite
-  test-compression.mjs     QPDF behaviour suite
-  test-browser.mjs         real-browser end-to-end suite
+  lib/fixtures.mjs         generated PDF fixtures + build() helper
+  lib/named-build.mjs      PDF builder with symbolic ${objectName} references
+  lib/fixture-manifest.mjs what each fixture is and what must happen to it
+  lib/compare.mjs          semantic diff between two PDFs
+  lib/engine.mjs           QPDF runner + jSquash codec + zlib for Node/Bun tests
+  generate/                fixture generators (see scripts/README.md)
+  test/                    the six suites
+  tools/                   benchmarks, explain, screenshots
+  probe/                   one-off engine investigations
+  fixtures/                37 committed PDFs; see scripts/FIXTURES.md
+  README.md                how the scripts folder is laid out
+  FIXTURES.md              fixture corpus documentation
+```
+
+The entry points are all named in `package.json`; `scripts/README.md` explains
+what each one is for.
 ```
 
 ### How the image path works
@@ -487,16 +585,23 @@ valid JPEG data.
 | `bun run dev` | Dev server |
 | `bun run build` | Static production build |
 | `bun run check` | `svelte-check` type checking |
-| `bun run fixtures` | Regenerate the committed PDF fixtures |
-| `bun run bench` | Orchestrator over every fixture × mode |
+| `bun run fixtures` | Regenerate the 37 committed fixtures |
+| `bun run bench` | Orchestrator over every fixture × mode, with per-file detail |
 | `bun run bench:legacy` | The old single-pass engine, for comparison |
+| `bun run explain <file.pdf> [mode]` | Why a document did or did not shrink, image by image |
+| `bun run verify:live-file <file.pdf> [mode]` | Run a real document against the deployed site |
 | `bun run test:engine` | QPDF behaviour and exit codes |
-| `bun run test:pipeline` | Engine integrity suite |
+| `bun run test:pipeline` | Orchestrator contracts on the savings corpus |
+| `bun run test:integrity` | Structural + semantic preservation across all fixtures |
+| `bun run test:fidelity` | Decoded-pixel fidelity for the lossy modes |
 | `bun run test:browser` | Build + verify the real UI in Chromium |
 | `bun run test:live` | Verify the deployed site end-to-end |
 | `bun run test` | All of the above |
 | `bun run screenshots` | Capture every UI state to `.screenshots/` |
 | `bun run wasm:probe` | Report the engine version and capability |
+
+Scripts live under `scripts/{lib,generate,test,tools,probe}/`; see
+[scripts/README.md](scripts/README.md).
 
 ### Engine findings worth knowing
 
@@ -537,6 +642,13 @@ worker is shaped the way it is:
    silently did nothing** — while every Bun test passed, because Bun does not
    take this code path. The cache is now keyed on the exact QPDF URL. This is
    the clearest argument for having a real browser suite at all.
+8. **`qpdf --json` is invisible under Bun.** The engine writes it straight to
+   file descriptor 1 via nodefs, so `diagnostics` comes back empty even on exit
+   0. Semantic comparisons therefore cannot rely on it outside a browser, which
+   is why `structure.ts` reads the document directly instead.
+9. **`qpdf --check` decodes DCTDecode streams.** A JPEG with a damaged
+   quantisation table fails `--check` outright. Useful: corrupt image data
+   cannot slip through candidate validation.
 
 ## Licence
 

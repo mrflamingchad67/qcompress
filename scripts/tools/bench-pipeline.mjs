@@ -8,14 +8,14 @@
  * candidate the orchestrator considered is listed too, so a run that gains
  * nothing can be seen rather than inferred.
  *
- * Usage: bun scripts/bench-pipeline.mjs [mode ...] [fixture ...]
+ * Usage: bun scripts/tools/bench-pipeline.mjs [mode ...] [fixture ...]
  */
 import { fileURLToPath } from 'node:url';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { optimize, MODE_SETTINGS } from '../src/lib/qpdf/pipeline.ts';
-import { makeRunner, makeCodec } from './engine.mjs';
+import { optimize, MODE_SETTINGS } from '../../src/lib/qpdf/pipeline.ts';
+import { makeRunner, makeCodec, makeZip } from '../lib/engine.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const report = (...a) => process.stdout.write(a.join(' ') + '\n');
@@ -23,7 +23,7 @@ const report = (...a) => process.stdout.write(a.join(' ') + '\n');
 /* ── fixtures ─────────────────────────────────────────────────────────────── */
 
 async function loadFixtures() {
-	const dir = path.join(here, 'fixtures');
+	const dir = path.join(here, '..', 'fixtures');
 	const files = (await readdir(dir)).filter((f) => f.endsWith('.pdf')).sort();
 	return Promise.all(
 		files.map(async (f) => ({ name: f, bytes: new Uint8Array(await readFile(path.join(dir, f))) }))
@@ -42,6 +42,7 @@ const list = only.length ? all.filter((f) => only.includes(f.name)) : all;
 
 const runner = makeRunner();
 const codec = await makeCodec();
+const zip = makeZip();
 
 /* ── run ──────────────────────────────────────────────────────────────────── */
 
@@ -64,10 +65,15 @@ for (const mode of useModes) {
 	let sumIn = 0;
 	let sumOut = 0;
 	let regressed = 0;
+	let smaller = 0;
+	let unchanged = 0;
+	let failures = 0;
+	let rejected = 0;
+	let sumMs = 0;
 
 	for (const f of list) {
 		const t0 = performance.now();
-		const res = await optimize({ bytes: f.bytes, mode }, runner, codec);
+		const res = await optimize({ bytes: f.bytes, mode, zip }, runner, codec);
 		const ms = Math.round(performance.now() - t0);
 
 		// Independent validation of whatever the orchestrator chose.
@@ -86,6 +92,14 @@ for (const mode of useModes) {
 		if (res.bytes.length > f.bytes.length) regressed++;
 		sumIn += f.bytes.length;
 		sumOut += res.bytes.length;
+		sumMs += ms;
+
+		// Tally what actually happened, so a headline percentage cannot hide
+		// that much of the corpus is a no-op, or that a candidate was rejected.
+		if (!valid) failures++;
+		else if (res.savedBytes > 0) smaller++;
+		else unchanged++;
+		for (const c of res.candidates) if (!c.valid) rejected++;
 
 		if (process.env.VERBOSE) {
 			for (const c of res.candidates) {
@@ -98,8 +112,16 @@ for (const mode of useModes) {
 	}
 
 	report('-'.repeat(90));
-	report(`TOTAL ${sumIn} -> ${sumOut} B  ${(((sumIn - sumOut) / sumIn) * 100).toFixed(2)}% smaller`);
-	if (regressed) report(`WARNING: ${regressed} fixture(s) came out LARGER than the original`);
+	report(
+		`TOTAL ${sumIn} -> ${sumOut} B  ${(((sumIn - sumOut) / sumIn) * 100).toFixed(2)}% smaller` +
+			`   (byte-weighted, not a mean of per-file percentages)`
+	);
+	report(
+		`  ${smaller} smaller, ${unchanged} returned unchanged, ${regressed} larger, ${failures} failed validation` +
+			`  |  ${rejected} candidate(s) rejected  |  ${(sumMs / 1000).toFixed(1)} s total (informal, single run)`
+	);
+	if (failures) report(`  WARNING: ${failures} output(s) did not pass qpdf --check and are NOT counted as wins`);
+	if (regressed) report(`  WARNING: ${regressed} fixture(s) came out LARGER than the original`);
 	totals.set(mode, { in: sumIn, out: sumOut });
 	report('');
 }

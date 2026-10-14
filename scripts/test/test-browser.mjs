@@ -15,10 +15,10 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { minimalPdf, textPdf, notAPdf } from './lib/fixtures.mjs';
+import { minimalPdf, textPdf, notAPdf } from '../lib/fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..', 'build');
+const root = path.join(here, '..', '..', 'build');
 
 const MIME = {
 	'.html': 'text/html; charset=utf-8',
@@ -276,7 +276,7 @@ console.log('\n[5] diagnostics capture works in the browser (encryption)');
 
 	// Build an encrypted PDF with the same WASM engine, off-page.
 	const glue = await import(
-		pathToFileURL(path.join(here, '..', 'src', 'lib', 'vendors', 'qpdf.js')).href
+		pathToFileURL(path.join(here, '..', '..', 'src', 'lib', 'vendors', 'qpdf.js')).href
 	);
 	const createModule = glue.default;
 	const mod = await createModule({ noInitialRun: true, print: () => {}, printErr: () => {} });
@@ -417,7 +417,7 @@ console.log('\n[9c] the three modes are real behavioural differences');
 	// A real JPEG photo, so the lossy modes have something to re-encode.
 	// scripts/lib/fixtures.mjs only builds Flate images, which are never
 	// touched by the image path.
-	const photo = new Uint8Array(await readFile(path.join(here, 'fixtures', 'photo-q90.pdf')));
+	const photo = new Uint8Array(await readFile(path.join(here, '..', 'fixtures', 'photo-q90.pdf')));
 
 	const { page, context } = await newPage();
 	await selectPdf(page, photo, 'photo.pdf');
@@ -463,6 +463,107 @@ console.log('\n[9c] the three modes are real behavioural differences');
 		`${lossless.Method} / ${maximum.Method}`
 	);
 
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[9d] Flate-wrapped JPEGs are handled in the browser');
+{
+	// The consequences of this bug are browser-only: `/Filter
+	// [/FlateDecode /DCTDecode]` stores a Flate-compressed JPEG, so feeding the
+	// stored bytes to the JPEG decoder fails on every image and the run reports
+	// "images unchanged". The worker has no Node zlib, so this also proves the
+	// native Compression Streams path works end to end.
+	const { readFile: rf } = await import('node:fs/promises');
+	const wrapped = new Uint8Array(await rf(path.join(here, '..', 'fixtures', 'jpeg-flate-wrapped.pdf')));
+
+	const { page, context } = await newPage();
+	await selectPdf(page, wrapped, 'wrapped.pdf');
+	await page.click('.chip:has-text("Maximum")');
+	await compress(page);
+
+	const rows = await page.$$eval('.report li', (ls) =>
+		ls.map((li) => ({
+			key: li.querySelector('.report-key')?.textContent?.trim(),
+			value: li.querySelector('.report-val')?.textContent?.trim()
+		}))
+	);
+	const images = rows.find((r) => r.key === 'Images')?.value ?? '';
+	check(
+		'flate-wrapped JPEG is re-encoded, not skipped',
+		/re-encoded/.test(images),
+		`Images row said "${images}" - the browser cannot unwrap this encoding`
+	);
+	check(
+		'wrapped-image document shrank',
+		/Saved/.test((await page.textContent('.verdict')) ?? ''),
+		(await page.textContent('.verdict')) ?? '(no verdict)'
+	);
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[9e] ICC-tagged RGB is re-encoded, 4-component ICC is not');
+{
+	const { readFile: rf } = await import('node:fs/promises');
+	const load = async (n) => new Uint8Array(await rf(path.join(here, '..', 'fixtures', n)));
+
+	const run = async (file) => {
+		const { page, context } = await newPage();
+		await selectPdf(page, await load(file), file);
+		await page.click('.chip:has-text("Maximum")');
+		await compress(page);
+		const rows = await page.$$eval('.report li', (ls) =>
+			ls.map((li) => ({
+				key: li.querySelector('.report-key')?.textContent?.trim(),
+				value: li.querySelector('.report-val')?.textContent?.trim()
+			}))
+		);
+		await context.close();
+		return rows.find((r) => r.key === 'Images')?.value ?? '';
+	};
+
+	const rgb = await run('jpeg-icc-rgb.pdf');
+	const cmyk = await run('jpeg-icc-cmyk.pdf');
+	check('ICCBased /N 3 is treated as RGB', /re-encoded/.test(rgb), rgb);
+	check('ICCBased /N 4 is left alone', !/re-encoded/.test(cmyk), cmyk);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[9f] repeated runs do not leak state between files');
+{
+	const { readFile: rf } = await import('node:fs/promises');
+	const photo = new Uint8Array(await rf(path.join(here, '..', 'fixtures', 'photo-q90.pdf')));
+	const { page, context } = await newPage();
+
+	// Interleave two documents. A worker that cached image data or reused a
+	// temp path between runs would eventually return one file's result for
+	// another.
+	// Each input must always produce an output named after *that* input. If the
+	// worker cached image data or reused a temp path, one of these would come
+	// back named for the other file.
+	const pairs = new Map();
+	let first = true;
+	for (let round = 0; round < 2; round++) {
+		for (const [name, buf] of [
+			['photo-a.pdf', photo],
+			['text-b.pdf', textPdf(3, 12)]
+		]) {
+			// "Compress another" only exists once a result is on screen, so the
+			// very first pass starts from the empty state.
+			if (!first) await page.click('button.secondary:has-text("Compress another")');
+			first = false;
+			await selectPdf(page, buf, name);
+			await compress(page);
+			const shown = (await page.textContent('.out-row .file-name')) ?? '';
+			const stem = name.replace(/\.pdf$/, '');
+			if (!shown.includes(stem)) {
+				check(`round ${round}: ${name} produced ${shown}`, false, 'result named for a different input');
+			}
+			pairs.set(name, shown);
+		}
+	}
+	check('each input maps to its own output, every round', pairs.size === 2, [...pairs].map(([k, v]) => `${k}->${v}`).join(' | '));
 	await context.close();
 }
 

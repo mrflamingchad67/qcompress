@@ -9,14 +9,14 @@
 import { fileURLToPath } from 'node:url';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { findJpegImages } from '../src/lib/qpdf/images.ts';
-import { makeRunner } from './engine.mjs';
+import { findJpegImages } from '../../src/lib/qpdf/images.ts';
+import { makeRunner } from '../lib/engine.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = (...a) => process.stdout.write(a.join(' ') + '\n');
 const runner = makeRunner();
 
-const dir = path.join(here, 'fixtures');
+const dir = path.join(here, '..', 'fixtures');
 const files = (await readdir(dir)).filter((f) => f.endsWith('.pdf')).sort();
 
 out('');

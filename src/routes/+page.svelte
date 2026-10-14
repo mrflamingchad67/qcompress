@@ -415,6 +415,10 @@
 						<span class="report-val">
 							{#if lossy && result.imagesReplaced > 0}
 								{result.imagesReplaced} of {result.imagesProcessed} re-encoded (lossy)
+							{:else if result.imageSkips?.length}
+								{result.imageSkips
+									.map((s) => `${s.count} ${s.reason}`)
+									.join(', ')}
 							{:else}
 								unchanged as-is
 							{/if}

@@ -21,7 +21,7 @@
  * as a success.
  */
 
-import { findJpegImages, isReencodable, applyReplacements, toBytes, type ImageObject } from './images';
+import { findJpegImages, isReencodable, skipReason, applyReplacements, toBytes, type ImageObject } from './images';
 import { rebuildXref } from './xref';
 import { dedupeStreams } from './dedupe';
 import { bytesToLatin1 } from './bytes';
@@ -107,6 +107,13 @@ export interface OptimizeRequest {
 	bytes: Uint8Array;
 	mode: QualityMode;
 	progress?: (stage: string) => void;
+	/**
+	 * Inflate/deflate, for images stored Flate-wrapped around a JPEG.
+	 *
+	 * The browser worker has no zlib binding, so this is null there unless a
+	 * codec is supplied; wrapped images are then skipped rather than mangled.
+	 */
+	zip?: ZipCodec;
 }
 
 export interface OptimizeResult {
@@ -119,6 +126,8 @@ export interface OptimizeResult {
 	durationMs: number;
 	imagesProcessed: number;
 	imagesReplaced: number;
+	/** Why some images were left alone, counted by reason. */
+	imageSkips: { reason: string; count: number }[];
 	/** True when no candidate beat the original. */
 	fallback: boolean;
 	candidates: { name: string; bytes: number; valid: boolean; lossy: boolean; rejected?: string }[];
@@ -171,6 +180,14 @@ export interface ImagePassResult {
 	bytes: Uint8Array | null;
 	imagesFound: number;
 	imagesReplaced: number;
+	/**
+	 * Why images were left alone, aggregated by reason.
+	 *
+	 * Without this the only thing a user learns about a document full of
+	 * unsupported images is "unchanged", which is honest but useless - it looks
+	 * like the compressor gave up rather than like a deliberate decision.
+	 */
+	skips: { reason: string; count: number }[];
 	rejected?: string;
 }
 
@@ -185,9 +202,10 @@ export async function optimiseImages(
 	settings: ModeSettings,
 	run: QpdfRunner,
 	codec: ImageCodec,
-	progress?: (stage: string) => void
+	progress?: (stage: string) => void,
+	zip: ZipCodec = browserZip
 ): Promise<ImagePassResult> {
-	const none: ImagePassResult = { bytes: null, imagesFound: 0, imagesReplaced: 0 };
+	const none: ImagePassResult = { bytes: null, imagesFound: 0, imagesReplaced: 0, skips: [] };
 
 	// 1. Flatten so every image stream is a top-level object.
 	progress?.('Reading images');
@@ -197,7 +215,19 @@ export async function optimiseImages(
 
 	const images = findJpegImages(flatText);
 	const targets = images.filter(isReencodable);
-	if (!targets.length) return none;
+
+	/** Why each ineligible image was left alone, counted by reason. */
+	const tallySkips = (): { reason: string; count: number }[] => {
+		const byReason = new Map<string, number>();
+		for (const img of images) {
+			const why = skipReason(img);
+			if (why === null) continue;
+			byReason.set(why, (byReason.get(why) ?? 0) + 1);
+		}
+		return [...byReason].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
+	};
+
+	if (!targets.length) return { ...none, imagesFound: 0, skips: tallySkips() };
 
 	// 2. Re-encode each eligible image, one at a time so decoded buffers are
 	//    released immediately instead of all being held at once.
@@ -207,7 +237,13 @@ export async function optimiseImages(
 	for (const img of targets) {
 		progress?.('Re-encoding images');
 		try {
-			const decoded = await codec.decode(img.data);
+			const raw = await toRawJpeg(img, zip);
+			if (!raw) {
+				failures.push(`obj ${img.num}: stored payload is not a decodable JPEG`);
+				continue;
+			}
+
+			const decoded = await codec.decode(raw);
 			let out = decoded;
 			let width = decoded.width;
 			let height = decoded.height;
@@ -226,11 +262,20 @@ export async function optimiseImages(
 			if (!encoded || encoded.length === 0) {
 				throw new Error('encoder returned no data');
 			}
-			// Never replace with something bigger.
-			if (encoded.length < img.length) {
+
+			// Re-wrap so the stored bytes match how this image was stored, then
+			// compare like-for-like: a raw JPEG must beat a Flate-wrapped one,
+			// not just its uncompressed size.
+			const wrapped = await fromRawJpeg(encoded, img.encoding, zip);
+			if (!wrapped) {
+				failures.push(`obj ${img.num}: could not re-wrap the encoded JPEG`);
+				continue;
+			}
+
+			if (wrapped.length < img.length) {
 				replace.set(img.num, {
 					num: img.num,
-					jpeg: encoded,
+					jpeg: wrapped,
 					width,
 					height,
 					originalBytes: img.length
@@ -257,11 +302,11 @@ export async function optimiseImages(
 	//    recorded offset is now wrong.
 	progress?.('Rebuilding document');
 	const spliced = applyReplacements(flatText, images, replace);
-	if (!spliced) return { ...none, imagesFound: targets.length };
+	if (!spliced) return { ...none, imagesFound: targets.length, skips: tallySkips() };
 
 	const repaired = rebuildXref(spliced.text);
 	if (!repaired) {
-		return { ...none, imagesFound: targets.length, rejected: 'could not rebuild cross-reference table' };
+		return { ...none, imagesFound: targets.length, skips: tallySkips(), rejected: 'could not rebuild cross-reference table' };
 	}
 
 	// 4. Structural pass over the repaired document, to reclaim whatever the
@@ -269,14 +314,63 @@ export async function optimiseImages(
 	progress?.('Optimising structure');
 	const final = await run(toBytes(repaired), structuralArgs('compress'));
 	if (!final.out) {
-		return { ...none, imagesFound: targets.length, rejected: 'structural pass failed' };
+		return { ...none, imagesFound: targets.length, skips: tallySkips(), rejected: 'structural pass failed' };
 	}
 
 	return {
 		bytes: final.out,
 		imagesFound: targets.length,
-		imagesReplaced: spliced.applied
+		imagesReplaced: spliced.applied,
+		skips: tallySkips()
 	};
+}
+
+/**
+ * Inflate/deflate for images whose payload is Flate-wrapped.
+ *
+ * `/Filter [/FlateDecode /DCTDecode]` stores a Flate-compressed JPEG. The
+ * dictionary is left exactly as it was - the replacement is deflated again on
+ * the way out - so no structural change is made and the filter chain keeps
+ * meaning the same thing.
+ *
+ * A `null` codec means no deflate is available, in which case these images are
+ * skipped rather than mangled.
+ */
+export type ZipCodec = {
+	inflate(data: Uint8Array): Promise<Uint8Array>;
+	deflate(data: Uint8Array): Promise<Uint8Array>;
+} | null;
+
+const browserZip: ZipCodec = null;
+
+/** Unwrap stored bytes to a raw JPEG, or null if the payload is not wrapped. */
+async function toRawJpeg(
+	img: { encoding: 'jpeg' | 'flate-jpeg' | null; data: Uint8Array },
+	zip: ZipCodec
+): Promise<Uint8Array | null> {
+	if (img.encoding === 'jpeg') return img.data;
+	if (img.encoding !== 'flate-jpeg' || !zip) return null;
+	try {
+		return await zip.inflate(img.data);
+	} catch {
+		// A payload that claims Flate but is not inflatable is malformed.
+		return null;
+	}
+}
+
+/** Re-wrap a re-encoded JPEG to match how the original was stored. */
+async function fromRawJpeg(
+	jpeg: Uint8Array,
+	encoding: 'jpeg' | 'flate-jpeg' | null,
+	zip: ZipCodec
+): Promise<Uint8Array | null> {
+	if (encoding === 'jpeg') return jpeg;
+	if (encoding !== 'flate-jpeg' || !zip) return null;
+	try {
+		return await zip.deflate(jpeg);
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -313,6 +407,7 @@ export async function optimize(
 ): Promise<OptimizeResult> {
 	const t0 = Date.now();
 	const { bytes, mode } = req;
+	const zip = req.zip ?? browserZip;
 	const progress = req.progress;
 	const candidates: Candidate[] = [];
 	let dedupeReason: string | null = null;
@@ -321,76 +416,72 @@ export async function optimize(
 		candidates.push({ name, lossy, bytes: out, valid: v.ok, rejected: v.reason, ms });
 	};
 
+	/**
+	 * Run one strategy, converting a thrown or rejected runner into a failed
+	 * candidate rather than an aborted run.
+	 *
+	 * A strategy that throws must not take the other strategies with it, and it
+	 * must never become the selected result. Both are enforced here: the throw
+	 * is recorded as the rejection reason and selection continues.
+	 */
+	const attempt = async (
+		name: string,
+		lossy: boolean,
+		fn: () => Promise<Uint8Array | null>
+	): Promise<Uint8Array | null> => {
+		const started = Date.now();
+		let out: Uint8Array | null = null;
+		let reason: string | null = null;
+		try {
+			out = await fn();
+		} catch (err) {
+			out = null;
+			reason = err instanceof Error ? err.message : String(err);
+		}
+		const verdict = out ? await validate(out, run) : { ok: false, reason: reason ?? 'no output' };
+		remember(name, lossy, out, Date.now() - started, verdict);
+		return verdict.ok ? out : null;
+	};
+
 	// Candidate 1 - structural compression.
 	progress?.('Optimising structure');
-	let t = Date.now();
-	const structural = await run(bytes, structuralArgs('compress'));
-	const structuralOut = structural.out;
-	remember(
-		'structural',
-		false,
-		structuralOut,
-		Date.now() - t,
-		structuralOut ? await validate(structuralOut, run) : { ok: false, reason: 'qpdf failed' }
-	);
+	await attempt('structural', false, async () => (await run(bytes, structuralArgs('compress'))).out);
 
 	// Candidate 2 - linearized (also useful when the structural pass regresses).
-	t = Date.now();
-	const linear = await run(bytes, buildArgs({ ...DEFAULT_OPTIONS, mode: 'linearize' }));
-	remember(
-		'linearize',
-		false,
-		linear.out,
-		Date.now() - t,
-		linear.out ? await validate(linear.out, run) : { ok: false, reason: 'qpdf failed' }
+	await attempt('linearize', false, async () =>
+		(await run(bytes, buildArgs({ ...DEFAULT_OPTIONS, mode: 'linearize' }))).out
 	);
 
 	// Candidate 3 - deduplicate repeated streams. Lossless, and on documents
 	// that stamp one image across many pages it is the biggest single win.
-	t = Date.now();
-	let deduped: Uint8Array | null = null;
-	try {
-		deduped = await dedupeCandidate(bytes, run, progress);
-	} catch (err) {
-		deduped = null;
-		dedupeReason = err instanceof Error ? err.message : String(err);
-	}
-	remember(
-		'dedupe',
-		false,
-		deduped,
-		Date.now() - t,
-		deduped ? await validate(deduped, run) : { ok: false, reason: dedupeReason ?? 'no duplicate streams found' }
-	);
+	const deduped = await attempt('dedupe', false, async () => {
+		try {
+			return await dedupeCandidate(bytes, run, progress);
+		} catch (err) {
+			dedupeReason = err instanceof Error ? err.message : String(err);
+			return null;
+		}
+	});
 
 	// Candidate 4 - image-aware. Lossy, so only for the lossy modes, and tried at
 	// every setting that mode allows.
 	const attempts = MODE_ATTEMPTS[mode];
 	let imagesReplaced = 0;
 	let imagesFound = 0;
+	let imageSkips: { reason: string; count: number }[] = [];
 
 	for (const settings of attempts) {
-		const label = `q${settings.quality}`;
 		if (!codec) break;
+		const label = `q${settings.quality}`;
 
-		t = Date.now();
-		try {
-			const pass = await optimiseImages(bytes, settings, run, codec, progress);
+		await attempt(`image-aware (${label})`, true, async () => {
+			const pass = await optimiseImages(bytes, settings, run, codec, progress, zip);
 			imagesFound = Math.max(imagesFound, pass.imagesFound);
 			imagesReplaced = Math.max(imagesReplaced, pass.imagesReplaced);
-			remember(
-				`image-aware (${label})`,
-				true,
-				pass.bytes,
-				Date.now() - t,
-				pass.bytes ? await validate(pass.bytes, run) : { ok: false, reason: pass.rejected ?? 'no image work applied' }
-			);
-		} catch (err) {
-			remember(`image-aware (${label})`, true, null, Date.now() - t, {
-				ok: false,
-				reason: err instanceof Error ? err.message : String(err)
-			});
-		}
+			if (pass.skips.length) imageSkips = pass.skips;
+			if (!pass.bytes && pass.rejected) throw new Error(pass.rejected);
+			return pass.bytes;
+		});
 	}
 
 	// Image re-encoding and deduplication do not fight each other: one shrinks
@@ -398,23 +489,10 @@ export async function optimize(
 	// the larger of the two wins rather than either one alone.
 	if (deduped && codec) {
 		for (const settings of attempts) {
-			const label = `q${settings.quality}`;
-			t = Date.now();
-			try {
-				const pass = await optimiseImages(deduped, settings, run, codec, progress);
-				remember(
-					`dedupe+image (${label})`,
-					true,
-					pass.bytes,
-					Date.now() - t,
-					pass.bytes ? await validate(pass.bytes, run) : { ok: false, reason: pass.rejected ?? 'no further gain' }
-				);
-			} catch (err) {
-				remember(`dedupe+image (${label})`, true, null, Date.now() - t, {
-					ok: false,
-					reason: err instanceof Error ? err.message : String(err)
-				});
-			}
+			await attempt(`dedupe+image (q${settings.quality})`, true, async () => {
+				const pass = await optimiseImages(deduped, settings, run, codec, progress, zip);
+				return pass.bytes;
+			});
 		}
 	}
 
@@ -438,6 +516,7 @@ export async function optimize(
 			durationMs: Date.now() - t0,
 			imagesProcessed: imagesFound,
 			imagesReplaced,
+			imageSkips,
 			fallback: true,
 			candidates: candidates.map(summarise)
 		};
@@ -453,6 +532,7 @@ export async function optimize(
 		durationMs: Date.now() - t0,
 		imagesProcessed: imagesFound,
 		imagesReplaced,
+			imageSkips,
 		fallback: false,
 		candidates: candidates.map(summarise)
 	};

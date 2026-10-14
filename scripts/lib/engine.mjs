@@ -10,10 +10,11 @@
  * Both are loaded lazily: nothing here runs until a test asks for it.
  */
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import zlib from 'node:zlib';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..');
+const root = path.join(here, '..', '..');
 
 /*
  * Console sink.
@@ -121,6 +122,18 @@ export function makeRunner({ password = '', decrypt = true } = {}) {
 }
 
 /**
+ * Inflate/deflate, for images stored Flate-wrapped around a JPEG.
+ *
+ * Node/Bun have zlib built in. The browser worker does not, so it passes null
+ * and the engine skips those images rather than corrupting them.
+ */
+export function makeZip() {
+	return {
+		inflate: async (data) => new Uint8Array(zlib.inflateSync(Buffer.from(data))),
+		deflate: async (data) => new Uint8Array(zlib.deflateSync(Buffer.from(data), { level: 9 }))
+	};
+}
+ /**
  * jSquash-backed ImageCodec.
  *
  * jSquash takes and returns ArrayBuffers and uses an options *object*, and its

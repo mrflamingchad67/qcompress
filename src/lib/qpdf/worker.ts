@@ -19,6 +19,7 @@
 
 import wasmUrl from '#lib/vendors/qpdf.wasm?url';
 import { optimize, type ImageCodec, type QualityMode } from './pipeline';
+import type { ZipCodec } from './pipeline';
 import { detach as detachBytes } from './bytes';
 import type { InspectResult, ProcessResult, WorkerRequest, WorkerResponse } from './protocol';
 
@@ -286,6 +287,34 @@ async function loadCodec(): Promise<ImageCodec> {
 }
 
 /**
+ * Inflate/deflate for images stored Flate-wrapped around a JPEG.
+ *
+ * Real documents routinely use `/Filter [/FlateDecode /DCTDecode]`, which stores
+ * a Flate-compressed JPEG. A worker has no Node `zlib`, but the platform has had
+ * `CompressionStream` / `DecompressionStream` for years, so this costs no
+ * dependency and no bundle weight. `'deflate'` is the zlib wrapper (RFC 1950),
+ * which is exactly what a PDF's `/FlateDecode` uses.
+ *
+ * Absent in an old browser, the codec is null and those images are skipped
+ * rather than corrupted.
+ */
+function makeZip(): ZipCodec {
+	if (typeof DecompressionStream === 'undefined' || typeof CompressionStream === 'undefined') {
+		return null;
+	}
+	return {
+		async inflate(data) {
+			const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate'));
+			return new Uint8Array(await new Response(stream).arrayBuffer());
+		},
+		async deflate(data) {
+			const stream = new Blob([data as BlobPart]).stream().pipeThrough(new CompressionStream('deflate'));
+			return new Uint8Array(await new Response(stream).arrayBuffer());
+		}
+	};
+}
+
+/**
  * A QpdfRunner bound to this worker's WASM build and the caller's password.
  *
  * The pipeline builds argv but never credentials: the password is written to
@@ -473,6 +502,7 @@ async function process(
 				fallback: false,
 				imagesProcessed: 0,
 				imagesReplaced: 0,
+				 imageSkips: [],
 				durationMs: 0
 			};
 		}
@@ -498,6 +528,7 @@ async function process(
 			{
 				bytes: input,
 				mode,
+				zip: makeZip(),
 				progress: (stage) => post({ id: -1, kind: 'status', stage })
 			},
 			run,
@@ -516,6 +547,7 @@ async function process(
 			fallback: result.fallback,
 			imagesProcessed: result.imagesProcessed,
 			imagesReplaced: result.imagesReplaced,
+			imageSkips: result.imageSkips,
 			durationMs: result.durationMs
 		};
 	} catch (err) {
@@ -531,6 +563,7 @@ async function process(
 			fallback: false,
 			imagesProcessed: 0,
 			imagesReplaced: 0,
+			 imageSkips: [],
 			durationMs: 0
 		};
 	}

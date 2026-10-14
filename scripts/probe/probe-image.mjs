@@ -7,10 +7,10 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { buildArgs } from '../src/lib/qpdf/options.ts';
+import { buildArgs } from '../../src/lib/qpdf/options.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..');
+const root = path.join(here, '..', '..');
 
 let quiet = true;
 for (const m of ['log', 'error', 'warn', 'info']) console[m] = () => quiet;
@@ -20,7 +20,7 @@ const glue = await import(pathToFileURL(path.join(root, 'src', 'lib', 'vendors',
 const mod = await glue.default({ noInitialRun: true, locateFile: (f) => path.join(root, 'src', 'lib', 'vendors', f) });
 
 const file = process.argv[2] ?? 'photo-q90.pdf';
-const bytes = new Uint8Array(await readFile(path.join(here, 'fixtures', file)));
+const bytes = new Uint8Array(await readFile(path.join(here, '..', 'fixtures', file)));
 
 mod.FS.writeFile('/in.pdf', bytes);
 const args = [...buildArgs({

@@ -23,10 +23,13 @@
  */
 
 import { bytesToLatin1, latin1ToBytes } from './bytes';
+import { parseObjects } from './structure';
 
 export interface ImageObject {
 	/** Object number. */
 	num: number;
+	/** Offset of the image's own dictionary, captured at discovery time. */
+	dictStart: number;
 	/** Offset of `stream\n` end, i.e. where the payload begins. */
 	dataStart: number;
 	/** Declared payload length from /Length. */
@@ -37,7 +40,19 @@ export interface ImageObject {
 	bitsPerComponent: number;
 	/** True when the image carries a separate soft mask (transparency). */
 	hasSMask: boolean;
-	/** JPEG bytes. */
+	/**
+	 * How the stored payload is wrapped, from the /Filter array.
+	 *
+	 * This matters more than it looks. `/Filter /DCTDecode` stores a raw JPEG,
+	 * but `/Filter [/FlateDecode /DCTDecode]` stores a *Flate-compressed*
+	 * JPEG: to recover samples you apply the filters left to right, so the
+	 * bytes on disk are the output of the first filter, not of the last.
+	 * Handing those to a JPEG decoder fails on every image. Real-world
+	 * documents written by Acrobat and similar tools use the wrapped form
+	 * routinely.
+	 */
+	encoding: 'jpeg' | 'flate-jpeg' | null;
+	/** JPEG bytes. For 'flate-jpeg' these are still Flate-wrapped. */
 	data: Uint8Array;
 }
 
@@ -71,6 +86,64 @@ const token = (dict: string, key: string): string | null => {
 	return m ? m[1] : null;
 };
 
+/** Every filter named under `/key`, whether `/A` or `[/A /B]`. */
+const filterList = (dict: string): string[] => {
+	const m = /\/Filter\s*(\[[^\]]*\]|\/[A-Za-z0-9]+)/.exec(dict);
+	if (!m) return [];
+	const raw = m[1].trim();
+	if (raw.startsWith('[')) {
+		return [...raw.matchAll(/\/([A-Za-z0-9]+)/g)].map((x) => x[1]);
+	}
+	const n = /^\/([A-Za-z0-9]+)/.exec(raw);
+	return n ? [n[1]] : [];
+};
+
+/**
+ * How the stored payload is wrapped, given the /Filter array.
+ *
+ * Filters run left to right when recovering samples, so the bytes on disk are
+ * the *first* filter's output. `null` means the combination is not something
+ * this engine is prepared to handle, and the image must be left alone.
+ */
+function encodingOf(filters: string[]): ImageObject['encoding'] {
+	if (!filters.includes('DCTDecode')) return null;
+	if (filters.length === 1) return 'jpeg';
+	if (filters.length === 2 && filters[0] === 'FlateDecode') return 'flate-jpeg';
+	return null;
+}
+
+/**
+ * Resolve a colour space to what the sample data actually is.
+ *
+ * A bare `/DeviceRGB` is easy. The common real-world form is
+ * `[/ICCBased 171 0 R]`, an ICC profile whose `/N` says how many components the
+ * image has. A 3-component profile in an image this engine can re-encode
+ * describes RGB data - the profile changes how those components are
+ * interpreted, not what they are, so replacing the JPEG leaves the profile
+ * exactly as correct as it was.
+ *
+ * Deliberately conservative: 4 components (CMYK and friends) is NOT treated as
+ * safe, because Adobe's APP14 inversion would have to be reproduced exactly and
+ * getting it wrong silently swaps colours.
+ */
+function colorspaceOf(dict: string, objects: Map<number, { dict: string }>): string {
+	const direct = /^\/([A-Za-z0-9]+)/.exec(
+		/\/ColorSpace\s*(\[[^\]]*\]|\/[A-Za-z0-9]+)/.exec(dict)?.[1]?.trim() ?? ''
+	);
+	if (direct) return direct[1];
+
+	const arr = /\/ColorSpace\s*\[\s*\/?ICCBased\s+(\d+)\s+\d+\s+R\s*\]/.exec(dict);
+	if (!arr) return '';
+
+	const profile = objects.get(parseInt(arr[1], 10))?.dict ?? '';
+	const n = /\/N\s+(\d+)/.exec(profile)?.[1];
+	const alternate = /\/Alternate\s*\/([A-Za-z0-9]+)/.exec(profile)?.[1];
+
+	if (n === '3') return alternate && alternate !== 'DeviceRGB' ? 'ICCBased' : 'DeviceRGB';
+	if (n === '1') return alternate && alternate !== 'DeviceGray' ? 'ICCBased' : 'DeviceGray';
+	return 'ICCBased';
+}
+
 /**
  * Every JPEG (DCTDecode) image XObject in a normalised PDF.
  *
@@ -78,6 +151,7 @@ const token = (dict: string, key: string): string | null => {
  */
 export function findJpegImages(s: string): ImageObject[] {
 	const out: ImageObject[] = [];
+	const objects = parseObjects(s);
 	const header = /(?:^|[\r\n>\]])(\d+)\s+0\s+obj\s*</g;
 	let m: RegExpExecArray | null;
 
@@ -88,7 +162,8 @@ export function findJpegImages(s: string): ImageObject[] {
 		const dict = s.slice(objStart, dictEnd);
 
 		if (!/\/Subtype\s*\/Image/.test(dict)) continue;
-		if (!/\/DCTDecode/.test(dict)) continue;
+		const encoding = encodingOf(filterList(dict));
+		if (!encoding) continue;
 
 		// stream keyword, then exactly one EOL, then the payload.
 		const afterDict = s.indexOf('stream', dictEnd);
@@ -103,27 +178,35 @@ export function findJpegImages(s: string): ImageObject[] {
 
 		out.push({
 			num: parseInt(m[1], 10),
+			dictStart: objStart,
 			dataStart,
 			length,
 			width: num(dict, 'Width') ?? 0,
 			height: num(dict, 'Height') ?? 0,
-			colorspace: token(dict, 'ColorSpace') ?? '',
+			colorspace: colorspaceOf(dict, objects),
 			bitsPerComponent: num(dict, 'BitsPerComponent') ?? 8,
 			hasSMask: /\/SMask/.test(dict),
+			encoding,
 			data: latin1ToBytes(s.slice(dataStart, dataStart + length))
 		});
 	}
 	return out;
 }
 
+/** Why an image cannot be re-encoded, or null when it can. */
+export function skipReason(img: ImageObject): string | null {
+	if (img.encoding === null) return 'unsupported filter chain';
+	if (img.width <= 0 || img.height <= 0) return 'missing dimensions';
+	if (img.bitsPerComponent !== 8) return `${img.bitsPerComponent}-bit components`;
+	if (img.colorspace !== 'DeviceRGB' && img.colorspace !== 'DeviceGray') {
+		return `${img.colorspace || 'unknown'} colour space`;
+	}
+	return null;
+}
+
 /** Is this image one we are willing to re-encode? */
 export function isReencodable(img: ImageObject): boolean {
-	if (img.width <= 0 || img.height <= 0) return false;
-	if (img.bitsPerComponent !== 8) return false;
-	// CMYK needs Adobe APP14 inversion; skip rather than corrupt.
-	const cs = img.colorspace;
-	if (cs !== 'DeviceRGB' && cs !== 'DeviceGray') return false;
-	return true;
+	return skipReason(img) === null;
 }
 
 export interface Replacement {
@@ -161,21 +244,29 @@ export function applyReplacements(
 	let bytesSaved = 0;
 
 	for (const { img, rep } of targets) {
-		const dictStart = out.lastIndexOf('<<', img.dataStart);
+		// Use the dictionary offset recorded at discovery. Searching backwards
+		// for '<<' is wrong: an image dictionary commonly contains nested
+		// dictionaries (/DecodeParms [ null << /Quality 60 >> ]), and the
+		// nearest '<<' is that inner one, so /Length would never be found and
+		// the payload would be spliced into a stream whose declared length
+		// still describes the old data.
+		const dictStart = img.dictStart;
 		const dictEnd = matchDict(out, dictStart);
 		if (dictStart === -1 || dictEnd === -1 || dictEnd > img.dataStart) continue;
 
 		let dict = out.slice(dictStart, dictEnd);
-		const oldDict = dict;
 
-		// New payload length.
-		dict = dict.replace(/(\/Length\s+)\d+/, `$1${rep.jpeg.length}`);
+		// New payload length. If /Length cannot be located the replacement is
+		// abandoned rather than applied: a stream whose declared length no
+		// longer matches its bytes is corrupt, and silently producing one is
+		// the single worst outcome this module could have.
+		const withLength = dict.replace(/(\/Length\s+)\d+/, `$1${rep.jpeg.length}`);
+		if (withLength === dict) continue;
+		dict = withLength;
 
 		// Dimensions change when we downscale.
 		if (rep.width !== img.width) dict = dict.replace(/(\/Width\s+)\d+/, `$1${rep.width}`);
 		if (rep.height !== img.height) dict = dict.replace(/(\/Height\s+)\d+/, `$1${rep.height}`);
-
-		if (dict === oldDict && rep.jpeg.length === img.length) continue;
 
 		const payload = bytesToLatin1(rep.jpeg);
 		// Replace the dict, then swap exactly the declared payload. Everything

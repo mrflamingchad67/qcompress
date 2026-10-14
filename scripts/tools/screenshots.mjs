@@ -4,11 +4,11 @@ import { createServer } from 'node:http';
 import { readFile, stat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { textPdf, minimalPdf } from './lib/fixtures.mjs';
+import { textPdf, minimalPdf } from '../lib/fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..', 'build');
-const outDir = path.join(here, '..', '.screenshots');
+const root = path.join(here, '..', '..', 'build');
+const outDir = path.join(here, '..', '..', '.screenshots');
 const MIME = {
 	'.html': 'text/html; charset=utf-8',
 	'.js': 'text/javascript; charset=utf-8',

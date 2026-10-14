@@ -9,16 +9,16 @@
  * Imports buildArgs() from src/ so the benchmark can never drift from what the
  * app actually ships.
  *
- * Usage: bun scripts/bench.mjs [strategy] [fixture ...]
+ * Usage: bun scripts/tools/bench.mjs [strategy] [fixture ...]
  */
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { buildArgs } from '../src/lib/qpdf/options.ts';
+import { buildArgs } from '../../src/lib/qpdf/options.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(here, '..');
+const root = path.join(here, '..', '..');
 
 /*
  * Silence qpdf.
@@ -116,7 +116,7 @@ export async function validate(bytes) {
 /* ── fixture discovery ──────────────────────────────────────────────────── */
 
 async function fixtures() {
-	const dir = path.join(here, 'fixtures');
+	const dir = path.join(here, '..', 'fixtures');
 	const files = (await readdir(dir)).filter((f) => f.endsWith('.pdf')).sort();
 	return Promise.all(
 		files.map(async (f) => ({ name: f, bytes: new Uint8Array(await readFile(path.join(dir, f))) }))

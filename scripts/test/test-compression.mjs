@@ -5,18 +5,18 @@
  * and (optionally) real-world PDFs passed on the command line.
  *
  * Usage:
- *   node scripts/test-compression.mjs
- *   node scripts/test-compression.mjs "C:\path\a.pdf" "C:\path\b.pdf"
+ *   node scripts/test/test-compression.mjs
+ *   node scripts/test/test-compression.mjs "C:\path\a.pdf" "C:\path\b.pdf"
  *
  * No network access, no user files are modified.
  */
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
-import { minimalPdf, textPdf, alreadyCompressedPdf, imagePdf, notAPdf } from './lib/fixtures.mjs';
+import { minimalPdf, textPdf, alreadyCompressedPdf, imagePdf, notAPdf } from '../lib/fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const gluePath = path.join(here, '..', 'src', 'lib', 'vendors', 'qpdf.js');
+const gluePath = path.join(here, '..', '..', 'src', 'lib', 'vendors', 'qpdf.js');
 const createModule = (await import(pathToFileURL(gluePath).href)).default;
 
 const newModule = () =>
@@ -24,7 +24,7 @@ const newModule = () =>
 		noInitialRun: true,
 		print: () => {},
 		printErr: () => {},
-		locateFile: (f) => path.join(here, '..', 'src', 'lib', 'vendors', f)
+		locateFile: (f) => path.join(here, '..', '..', 'src', 'lib', 'vendors', f)
 	});
 
 /** Run one qpdf invocation, capturing its diagnostics. */

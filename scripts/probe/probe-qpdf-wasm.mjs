@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const gluePath = path.join(here, '..', 'src', 'lib', 'vendors', 'qpdf.js');
+const gluePath = path.join(here, '..', '..', 'src', 'lib', 'vendors', 'qpdf.js');
 
 const createModule = (await import(pathToFileURL(gluePath).href)).default;
 
@@ -22,7 +22,7 @@ let err = [];
 const mod = await createModule({
 	print: (s) => out.push(s),
 	printErr: (s) => err.push(s),
-	locateFile: (f) => path.join(here, '..', 'src', 'lib', 'vendors', f)
+	locateFile: (f) => path.join(here, '..', '..', 'src', 'lib', 'vendors', f)
 });
 
 console.log('ENV                :', JSON.stringify(mod.ENV));

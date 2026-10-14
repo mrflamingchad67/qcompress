@@ -11,13 +11,13 @@
  *   - the lossy modes really re-encode, not just run silently
  *   - no request ever carries document bytes
  *
- * Usage: bun scripts/test-live.mjs [url]
+ * Usage: bun scripts/test/test-live.mjs [url]
  */
 import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { textPdf } from './lib/fixtures.mjs';
+import { textPdf } from '../lib/fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BASE = process.argv[2] ?? 'https://qcompress.pages.dev';
@@ -97,7 +97,7 @@ check('savings reported', /Saved/.test((await page.textContent('.verdict')) ?? '
 // extension instead of URL would all pass every local test and still leave the
 // lossy modes doing nothing in production. This is the only place that is
 // caught.
-const photo = new Uint8Array(await readFile(path.join(here, 'fixtures', 'photo-q90.pdf')));
+const photo = new Uint8Array(await readFile(path.join(here, '..', 'fixtures', 'photo-q90.pdf')));
 
 await page.click('button.secondary:has-text("Compress another")');
 await page.setInputFiles('input[type=file]', {

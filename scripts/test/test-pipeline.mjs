@@ -7,22 +7,23 @@
  * for the properties it promises - and the lossless mode is checked for the
  * properties it must never break.
  *
- * Usage: bun scripts/test-pipeline.mjs
+ * Usage: bun scripts/test/test-pipeline.mjs
  */
 import { fileURLToPath } from 'node:url';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { optimize, MODE_SETTINGS, MODE_ATTEMPTS, validate } from '../src/lib/qpdf/pipeline.ts';
-import { findJpegImages } from '../src/lib/qpdf/images.ts';
-import { bytesToLatin1, bytesEqual } from '../src/lib/qpdf/bytes.ts';
-import { makeRunner, makeCodec } from './engine.mjs';
+import { optimize, MODE_SETTINGS, MODE_ATTEMPTS, validate } from '../../src/lib/qpdf/pipeline.ts';
+import { findJpegImages } from '../../src/lib/qpdf/images.ts';
+import { bytesToLatin1, bytesEqual } from '../../src/lib/qpdf/bytes.ts';
+import { makeRunner, makeCodec, makeZip } from '../lib/engine.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const log = (...a) => process.stdout.write(a.join(' ') + '\n');
 
 const runner = makeRunner();
 const codec = await makeCodec();
+const zip = makeZip();
 
 /* ── tiny harness ─────────────────────────────────────────────────────────── */
 
@@ -74,9 +75,34 @@ async function testAsync(name, fn) {
 
 /* ── fixtures ─────────────────────────────────────────────────────────────── */
 
+/**
+ * The original savings corpus only.
+ *
+ * This suite was written against the eight fixtures that existed before the
+ * integrity stage, several of which it names by hand. The corpus has since
+ * grown to 37, including deliberately malformed documents, and globbing them
+ * all here would have this suite re-assert things that
+ * `scripts/test/test-integrity.mjs` now covers properly - including on inputs this
+ * suite has no expectation for.
+ *
+ * Run both. This one proves the orchestrator's core contracts on the corpus the
+ * savings numbers are measured against; the integrity suite proves semantic
+ * preservation across the whole corpus.
+ */
+const SAVINGS_CORPUS = [
+	'alpha-smask.pdf',
+	'graphic-q75.pdf',
+	'oversized-600dpi.pdf',
+	'photo-flate-p0.pdf',
+	'photo-flate-p1.pdf',
+	'photo-q35.pdf',
+	'photo-q90.pdf',
+	'scan-300dpi-q80.pdf'
+];
+
 async function loadFixtures() {
-	const dir = path.join(here, 'fixtures');
-	const files = (await readdir(dir)).filter((f) => f.endsWith('.pdf')).sort();
+	const dir = path.join(here, '..', 'fixtures');
+	const files = SAVINGS_CORPUS.filter((f) => f.endsWith('.pdf')).sort();
 	return Promise.all(
 		files.map(async (f) => ({ name: f, bytes: new Uint8Array(await readFile(path.join(dir, f))) }))
 	);
@@ -244,7 +270,7 @@ for (const mode of ['balanced', 'maximum']) {
 
 	for (const f of fixtures) {
 		await testAsync(`${mode}: ${f.name} keeps every page`, async () => {
-			const res = await optimize({ bytes: f.bytes, mode }, runner, codec);
+			const res = await optimize({ bytes: f.bytes, mode, zip }, runner, codec);
 			results.set(f.name, res);
 			const before = await pageCount(f.bytes);
 			const after = await pageCount(res.bytes);

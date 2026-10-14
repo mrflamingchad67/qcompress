@@ -11,7 +11,7 @@
  *
  * Everything is deterministic: the same seed always draws the same picture.
  *
- * Run: bun scripts/make-fixtures.mjs
+ * Run: bun scripts/generate/make-fixtures.mjs
  */
 import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -20,7 +20,7 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const outDir = path.join(here, 'fixtures');
+const outDir = path.join(here, '..', 'fixtures');
 
 /* ── PDF assembly ──────────────────────────────────────────────────────── */
 

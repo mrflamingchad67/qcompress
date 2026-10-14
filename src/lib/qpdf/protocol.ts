@@ -37,6 +37,14 @@ export interface ProcessResult {
 	/** Images examined and how many were actually rewritten. */
 	imagesProcessed: number;
 	imagesReplaced: number;
+	/**
+	 * Why images were left alone, counted by reason.
+	 *
+	 * Without this a document full of unsupported images just reports
+	 * "unchanged", which reads as the compressor giving up rather than as a
+	 * deliberate, safe decision.
+	 */
+	imageSkips: { reason: string; count: number }[];
 	/** Wall-clock time for the whole run. */
 	durationMs: number;
 }

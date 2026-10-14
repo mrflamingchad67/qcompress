@@ -9,17 +9,17 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { findJpegImages, isReencodable } from '../src/lib/qpdf/images.ts';
-import { dedupeStreams } from '../src/lib/qpdf/dedupe.ts';
-import { bytesToLatin1 } from '../src/lib/qpdf/bytes.ts';
-import { makeRunner, makeCodec } from './engine.mjs';
+import { findJpegImages, isReencodable } from '../../src/lib/qpdf/images.ts';
+import { dedupeStreams } from '../../src/lib/qpdf/dedupe.ts';
+import { bytesToLatin1 } from '../../src/lib/qpdf/bytes.ts';
+import { makeRunner, makeCodec } from '../lib/engine.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = (...a) => process.stdout.write(a.join(' ') + '\n');
 
 const file = process.argv[2] ?? 'scan-300dpi-q80.pdf';
 const quality = Number(process.argv[3] ?? 78);
-const bytes = new Uint8Array(await readFile(path.join(here, 'fixtures', file)));
+const bytes = new Uint8Array(await readFile(path.join(here, '..', 'fixtures', file)));
 const runner = makeRunner();
 const codec = await makeCodec();
 
