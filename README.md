@@ -310,6 +310,7 @@ scripts/
 | `bun run check` | `svelte-check` type checking |
 | `bun run test:engine` | Verify QPDF behaviour and compression against fixtures |
 | `bun run test:browser` | Build + verify the real UI in Chromium |
+| `bun run test:live` | Verify the deployed site end-to-end (`bun run test:live <url>`) |
 | `bun run test` | All of the above |
 | `bun run screenshots` | Capture every UI state to `.screenshots/` |
 | `bun run wasm:probe` | Report the engine version and capability |

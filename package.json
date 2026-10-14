@@ -12,6 +12,7 @@
     "wasm:probe": "bun scripts/probe-qpdf-wasm.mjs",
     "test:engine": "bun scripts/test-compression.mjs",
     "test:browser": "bun run build && bun scripts/test-browser.mjs",
+    "test:live": "bun scripts/test-live.mjs",
     "screenshots": "bun run build && bun scripts/screenshots.mjs",
     "test": "bun run check && bun run test:engine && bun scripts/test-browser.mjs"
   },
