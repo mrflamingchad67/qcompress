@@ -14,6 +14,49 @@ bun run preview   # serve the production build
 
 ---
 
+## Deploying
+
+The build output is a plain static site in `build/` (adapter-static,
+`ssr = false`, `prerender = true`). `static/_headers` sets immutable caching for
+the hashed assets and the WASM binary. No server, no environment variables, no
+runtime configuration.
+
+### Cloudflare Pages (free)
+
+Either connect the repository in the dashboard:
+
+| Setting | Value |
+| --- | --- |
+| Framework preset | None |
+| Build command | `bun run build` |
+| Build output directory | `build` |
+| Root directory | *(repo root)* |
+| Environment variables | *(none)* |
+
+…or let `.github/workflows/deploy.yml` do it. Add two repository secrets
+(**Settings → Secrets and variables → Actions**):
+
+- `CLOUDFLARE_API_TOKEN` — a token with **Cloudflare Pages: Edit**
+- `CLOUDFLARE_ACCOUNT_ID` — shown in the Cloudflare dashboard sidebar
+
+Pushing to `main` then builds, type-checks, runs the engine tests and deploys.
+
+To deploy from a terminal instead:
+
+```bash
+bunx wrangler login
+bun run build
+bunx wrangler pages deploy build --project-name=qcompress
+```
+
+> The Pages build image does not include Bun by default. If you set the build
+> command in the dashboard, either use `npm install && npm run build`
+> (requires a `package-lock.json`) or add `curl -fsSL https://bun.sh/install | bash`
+> as a first build command. The GitHub workflow installs Bun explicitly and has
+> no such caveat.
+
+---
+
 ## What it actually does
 
 Compression here means **structural** PDF optimisation only. The engine
