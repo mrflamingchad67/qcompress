@@ -332,8 +332,8 @@ every network request and fails if a *second* compression issues any request.
 ## Interface
 
 The layout follows the reference UI (`convert.to.it`): a single centred start
-card, then a compact working view, with the selected file in a bottom tray
-that only appears once there is one.
+card, then a compact working view. There is no file tray — the selected file is
+shown in the drop card itself, and the footer is only a meta bar.
 
 ```
 ┌ PDF Compressor ────────────────────────────── (small wordmark)
@@ -352,17 +352,16 @@ that only appears once there is one.
 │  ( Lossless )  ( Balanced )  ( Maximum )
 │  Lossless work first, then re-encodes JPEG photos at a high quality…
 │
-├ [ file.pdf 30 KB × ] ───────────────────────── bottom tray (only with a file)
 └ © 2026, mrflamingchad67                        < > Source
 ```
 
 * **Empty state** — one centred dashed card with the wordmark, an upload badge,
   "Click to select a file", "or drag and drop". Clicking or pressing
   Enter/Space opens the native picker; files can also be dropped anywhere on it.
-  **No tray bar** — the footer is just the meta row until a file is loaded.
 * **Working view** — the same element becomes a compact file row (name, size,
   page count, PDF version, encryption), followed by the Compress action and the
-  three modes with a plain-language note about what each one does.
+  three modes with a plain-language note about what each one does. Clicking the
+  file row opens the picker again to replace the file.
 * **Processing** — an indeterminate bar plus a truthful status line. QPDF gives
   no incremental progress, so no percentage is invented.
 * **Result** — output filename, the real byte/percentage change, and an honest
@@ -389,14 +388,13 @@ stored preference — fewer states to maintain and nothing to persist.
 
 [Lucide](https://lucide.dev) (`@lucide/svelte`), bundled locally — no CDN, no
 runtime download, no webfont. Icons are imported individually and the package
-is `sideEffects: false`, so the production bundle contains **exactly the eight
+is `sideEffects: false`, so the production bundle contains **exactly the seven
 components used** and nothing else:
 
 | Icon | Used for | Size / stroke |
 | --- | --- | --- |
 | `FileUp` | upload badge on the drop card | 22 / 1.8 |
-| `FileText` | file row and tray chip | 14–18 / 1.8–2 |
-| `X` | remove file (tray chip) | 13 / 2 |
+| `FileText` | file row and output row | 14–18 / 1.8–2 |
 | `LoaderCircle` | processing state (spins) | 16 / 2 |
 | `CircleAlert` | error and "no size reduction" | 14–15 / 2 |
 | `CircleCheck` | successful completion | 15–18 / 2 |
@@ -407,10 +405,10 @@ components used** and nothing else:
 equivalents are `CircleCheck` and `CircleAlert`, which is what is used here.
 
 Accessibility: every icon sits next to a text label and is `aria-hidden`, so
-screen readers announce "Download PDF", not a stray graphic. The one icon-only
-control (remove file) carries an `aria-label`. Svelte's CSS scoping cannot reach
-into a child component, so icon styling is applied through the parent
-(`.verdict :global(svg)` and friends) rather than a class handed to the icon.
+screen readers announce "Download PDF", not a stray graphic. There are no
+icon-only controls. Svelte's CSS scoping cannot reach into a child component,
+so icon styling is applied through the parent (`.verdict :global(svg)` and
+friends) rather than a class handed to the icon.
 
 Verify with:
 

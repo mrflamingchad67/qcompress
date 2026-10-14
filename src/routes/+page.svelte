@@ -11,8 +11,7 @@
 		FileText,
 		FileUp,
 		LoaderCircle,
-		RotateCcw,
-		X
+		RotateCcw
 	} from '@lucide/svelte';
 	import { engine, type ProgressStage } from '#lib/qpdf/client';
 	import { MODE_ATTEMPTS, type QualityMode } from '#lib/qpdf/pipeline';
@@ -466,29 +465,10 @@
 	{/if}
 </main>
 
-<!-- ── file tray + meta bar ───────────────────────────────────────────── -->
+<!-- ── meta bar ──────────────────────────────────────────────────────── -->
+<!-- The selected file is shown in the drop card itself; there is no separate
+     file tray. -->
 <footer class="footer">
-	<!-- The tray only exists once there is a file to show; there is no
-	     placeholder row taking up space on an empty page. -->
-	{#if file}
-		<div class="tray">
-			<div class="chip-file">
-				<FileText size={14} strokeWidth={2} aria-hidden="true" />
-				<span class="chip-name" title={file.name}>{file.name}</span>
-				<span class="chip-size">{formatBytes(file.size)}</span>
-				<button
-					type="button"
-					class="link file-row"
-					onclick={resetAll}
-					disabled={busy}
-					aria-label="Remove file"
-				>
-					<X size={13} strokeWidth={2} aria-hidden="true" />
-				</button>
-			</div>
-		</div>
-	{/if}
-
 	<div class="meta">
 		<span>&copy; {year}, {author}</span>
 		<a class="source" href={repoUrl} target="_blank" rel="noopener noreferrer">
@@ -500,18 +480,14 @@
 
 <style>
 	/* ── shell ───────────────────────────────────────────────────────── */
+	/* Only the meta bar is fixed to the bottom, so exactly its height is
+	   reserved. There is no file tray. */
 	.panel {
-		/* The meta bar is always present; the file tray only appears once a
-		   file is loaded, so it is not reserved for on an empty page. */
 		min-height: calc(100vh - 33px);
 		display: flex;
 		flex-direction: column;
 		gap: 0.625rem;
 		padding: 1.5rem 0.75rem 5rem;
-	}
-
-	.panel:not(.empty) {
-		min-height: calc(100vh - 49px - 33px);
 	}
 
 	/* Empty state mirrors the reference: wordmark + one dashed card, centred. */
@@ -988,20 +964,11 @@
 		min-width: 0;
 	}
 
-	/* ── footer: file tray + meta bar ────────────────────────────────── */
+	/* ── footer: meta bar ────────────────────────────────────────────── */
 	.footer {
 		position: fixed;
 		inset: auto 0 0 0;
 		z-index: 10;
-	}
-
-	.tray {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		min-height: 49px;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg-tray);
 	}
 
 	.meta {
@@ -1031,38 +998,6 @@
 
 	.source :global(svg) {
 		flex: none;
-	}
-
-	.chip-file {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		max-width: 20rem;
-		padding: 0.25rem 0.4375rem 0.25rem 0.625rem;
-		background: var(--bg-card);
-		border: 1px solid var(--border-strong);
-		border-radius: var(--radius-sm);
-		color: var(--primary);
-	}
-
-	.chip-file :global(svg) {
-		flex: none;
-	}
-
-	.chip-name {
-		min-width: 0;
-		overflow: hidden;
-		color: var(--text-primary);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.chip-size {
-		color: var(--text-tertiary);
-		font-size: 0.75rem;
-		white-space: nowrap;
 	}
 
 	/* ── responsive ──────────────────────────────────────────────────── */

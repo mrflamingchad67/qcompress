@@ -485,10 +485,11 @@ console.log('\n[10] icons render as inline SVG from the local bundle');
 	const hidden = await page.$$eval('.upload-badge svg', (s) => s.map((e) => e.getAttribute('aria-hidden')));
 	check('decorative icon is aria-hidden', hidden.every((h) => h === 'true'), hidden.join(','));
 
-	// The tray chip carries the icon-only remove action.
+	// There is no file tray; the file row in the drop card is the only place
+	// the selected file is shown, and it is itself the replace-file control.
 	await selectPdf(page, textPdf(2, 8), 'icons.pdf');
-	const removeLabel = await page.getAttribute('.tray .link', 'aria-label');
-	check('remove action has an accessible name', !!removeLabel, String(removeLabel));
+	check('no file tray exists', !(await page.isVisible('.tray')));
+	check('file is shown in the drop card', await page.isVisible('.file-row'));
 
 	await compress(page);
 	const dlText = (await page.textContent('a.primary'))?.trim();
