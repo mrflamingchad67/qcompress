@@ -70,8 +70,9 @@ compression defect, and no amount of running the suite would have surfaced it.
 | P1 | Commit the text-layer stage | Review and commit verified work | **Done** (`d6011db`) |
 | P2 | Performance profiling | Measure before optimising | **Done** — bottleneck found and addressed |
 | P3 | `verify:file` command | One command running structural, text and visual checks | Written — **not yet run** |
-| P4 | Deploy stages 10–11 | The resize change reaches users only on deploy | Awaiting authorisation |
-| P5 | Stale-codec hypothesis | Explain a download that differs from every fresh run | Blocked on two deploys |
+| P4 | Deploy stages 10–11 | The resize change reaches users only on deploy | **Done** — deployed manually; CI cannot publish |
+| P5 | Repository secrets | `deploy.yml` cannot deploy without them, so every push fails at publish | Not started |
+| P6 | Stale-codec hypothesis | Explain a download that differs from every fresh run | **Closed** — disproved; see P0 |
 
 ### P0 — resolved, and how
 
@@ -83,11 +84,43 @@ modified, so this is conformant behaviour.
 
 **The compressor is deterministic. No fix was required and none was made.**
 
-One loose end remains unexplained: an earlier download of the same document was
-1,533,838 B while fresh runs produced 1,534,266 B, differing in 7,126 ranges. The
-leading hypothesis is a browser tab left open across a deploy, holding the
-lazily-cached codec chunk. Testing it requires two deploys, so it is P5 rather
-than a claim.
+An earlier download of the same document was 1,533,838 B while fresh runs
+produced 1,534,266 B. The hypothesis was a browser tab open across a deploy,
+holding a lazily-cached codec chunk. **That hypothesis is now dead**, disproved
+by the local-vs-live comparison below: all 33 image payloads are byte-identical
+after inflate, so the two runtimes ran the same codec, not different builds.
+
+### Local harness versus the live site
+
+Comparing a local `verify:file` run with a `verify-live-file` run of the same
+32-page document exposed a standing difference:
+
+```
+local (Node, zlib level 9)          1,437,194 B
+live  (browser, CompressionStream) 1,440,496 B    +3,302 B
+```
+
+Fully accounted for:
+
+| | |
+| --- | --- |
+| 33 image streams — identical JPEGs, weaker deflate | +3,310 B |
+| XRef stream — contains the differing `/ID` | −8 B |
+
+Every image inflates to a **byte-identical** JPEG on both sides, so the codec
+agrees exactly. The size difference is the container: Node uses
+`zlib.deflateSync(level: 9)`, while the browser's `CompressionStream('deflate')`
+exposes no level control. Re-deflating the same JPEG both ways reproduces the
+observed per-object deltas (for example 38,773 B locally against 38,937 B
+through `CompressionStream`, an observed +164 B).
+
+Two consequences worth stating plainly:
+
+- The suites run on Node, so they measure the **smaller** of the two outputs. A
+  browser user gets roughly 0.23 % more bytes from identical pixels.
+- This is a platform limitation, not a defect. `CompressionStream` offers no
+  level parameter, so the browser cannot be brought to parity without a WASM
+  deflate implementation.
 
 ### P2 — what profiling found, and what it cost to fix
 

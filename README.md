@@ -39,9 +39,18 @@ Either connect the repository in the dashboard:
 - `CLOUDFLARE_API_TOKEN` — a token with **Cloudflare Pages: Edit**
 - `CLOUDFLARE_ACCOUNT_ID` — shown in the Cloudflare dashboard sidebar
 
-Pushing to `main` then builds, type-checks, runs the engine tests and deploys.
+With those two secrets in place, pushing to `main` builds, type-checks, runs the
+engine tests and deploys.
 
-To deploy from a terminal instead:
+**Without them the workflow still runs the build, the type check and every
+verification suite — and then fails at the publish step.** So a green-looking
+push is not evidence that the site was updated. Check the deploy step, or
+`gh run list`, before assuming a push went live. On a repository with no
+secrets configured every push fails this way, and the live site stays where it
+was without saying so.
+
+To deploy from a terminal instead — this publishes your **working tree**, not a
+commit, so confirm `git status` is clean first:
 
 ```bash
 bunx wrangler login
