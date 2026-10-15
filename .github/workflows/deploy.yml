@@ -80,6 +80,31 @@ jobs:
       name: production
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Fail before wrangler is installed, not after. Without this the run
+      # spends two minutes on green checks and then dies inside wrangler's
+      # output, which reads like a deploy problem rather than a missing secret
+      # - and a red build step is easy to mistake for a broken release.
+      - name: Check publish credentials
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$ACCOUNT" ]; then
+            echo "::error::Nothing was published - repository secrets are not configured."
+            echo ""
+            echo "The build, the type check and every verification suite above DID run and pass."
+            echo "The live site is unchanged. This is not a code failure."
+            echo ""
+            echo "To fix, add both under Settings > Secrets and variables > Actions:"
+            echo "  CLOUDFLARE_API_TOKEN  - a token with 'Cloudflare Pages: Edit'"
+            echo "  CLOUDFLARE_ACCOUNT_ID - shown in the Cloudflare dashboard sidebar"
+            echo ""
+            echo "Then re-run this workflow. Until then, deploy from a terminal:"
+            echo "  bun run build && bunx wrangler pages deploy build --project-name=qcompress"
+            exit 1
+          fi
+          echo "Credentials present; publishing."
+
       - name: Deploy to Cloudflare Pages
         id: deployment
         uses: cloudflare/wrangler-action@v3
