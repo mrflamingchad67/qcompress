@@ -58,6 +58,41 @@ export interface ImageCodec {
 	resize(image: ImageData, width: number, height: number): Promise<ImageData>;
 }
 
+/**
+ * Downscaling options, pinned rather than inherited.
+ *
+ * `@jsquash/resize` defaults to lanczos3 + premultiply + linearRGB. Calling it
+ * with only a width and height silently inherits all three, and none of them was
+ * ever chosen by this project - they are simply what the library does by
+ * default. Profiling showed resizing to be 60.8% of an image pass, at 291 ms per
+ * 3.24-megapixel image, which is far slower than the work justifies.
+ *
+ * Measured over the real images of the 32-page book (2400x1351 -> 1700x957,
+ * 27 images, same encode quality, comparing against what is used today):
+ *
+ *   inherited defaults                291 ms/image   reference
+ *   lanczos3, linearRGB off           185 ms/image   1.52x
+ *   triangle, these options            96 ms/image   2.91x, ~7.5% smaller output
+ *
+ * `triangle` is a two-tap kernel where lanczos3 takes six, and dropping
+ * linearRGB avoids an sRGB -> linear -> resize -> linear -> sRGB round trip per
+ * pixel. It also produces fewer high-frequency artefacts, so the re-encoded JPEG
+ * is smaller as well as cheaper to produce: faster and smaller rather than a
+ * trade between them.
+ *
+ * This deliberately changes pixels, and therefore output bytes and the visual
+ * baselines. It is a compression-behaviour decision, not a refactor. Changing
+ * any of these three values requires re-running the fidelity and visual suites;
+ * see ROADMAP.md. It lives here, rather than in each codec, so the Node harness
+ * and the browser worker cannot drift apart - they must agree byte for byte or
+ * the suites compare different pipelines.
+ */
+export const RESIZE_OPTIONS = {
+	method: 'triangle',
+	premultiply: false,
+	linearRGB: false
+} as const;
+
 export interface ModeSettings {
 	/** JPEG quality 1-100. */
 	quality: number;

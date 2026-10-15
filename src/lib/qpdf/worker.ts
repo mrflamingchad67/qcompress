@@ -18,7 +18,7 @@
  */
 
 import wasmUrl from '#lib/vendors/qpdf.wasm?url';
-import { optimize, type ImageCodec, type QualityMode } from './pipeline';
+import { optimize, RESIZE_OPTIONS, type ImageCodec, type QualityMode } from './pipeline';
 import type { ZipCodec } from './pipeline';
 import { detach as detachBytes } from './bytes';
 import type { InspectResult, ProcessResult, WorkerRequest, WorkerResponse } from './protocol';
@@ -278,7 +278,7 @@ async function loadCodec(): Promise<ImageCodec> {
 			encode: async (image: ImageData, quality: number) =>
 				new Uint8Array(await encode(image, { quality })),
 			resize: (image: ImageData, width: number, height: number) =>
-				resize(image, { width, height })
+				resize(image, { ...RESIZE_OPTIONS, width, height })
 		};
 	};
 

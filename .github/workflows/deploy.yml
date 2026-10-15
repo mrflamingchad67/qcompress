@@ -54,6 +54,12 @@ jobs:
       - name: Verify the text-layer extractor and its negative controls
         run: bun run test:text-extract
 
+      # Proves the fidelity suite's comparison can actually fail. The suite
+      # gained a like-for-like comparison for downscaled images, and a check
+      # that cannot fail is not a check.
+      - name: Verify the fidelity comparison detects damage
+        run: bun run test:fidelity-control
+
       # Catches text loss that passes every structural and visual check.
       - name: Verify text-layer preservation
         run: bun run test:text-integrity

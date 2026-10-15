@@ -110,6 +110,26 @@ async function imagesOf(bytes) {
  *            than re-encoding the source, such as a colour swap or a
  *            mis-decoded channel.
  *
+ *   downscaled  an image the pipeline also downscaled. This group did not exist
+ *               until the suite was fixed to stop silently skipping resized
+ *               images, so the `normal` bounds above were derived from a corpus
+ *               that contained no downscaled image at all. These are therefore
+ *               measured separately, not relaxed: re-encoding a downscaled
+ *               photographic scan at quality 55 costs about MAE 5.5 whatever
+ *               kernel is used, which is well short of anything visible - the
+ *               rendered-page visual suite passes on the same fixtures.
+ *
+ *                 Measured worst case across all five kernels, on the two
+ *                 fixtures that downscale, in maximum mode:
+ *
+ *                   triangle 5.50 / 73   catrom 5.68 / 89   mitchell 5.63 / 73
+ *                   lanczos3 6.31 / 93   lanczos3 + linearRGB 9.11 / 89
+ *
+ *                 triangle is the best of them on error AND on output size, so
+ *                 the 8 / 128 below is set from the measured best case with
+ *                 margin, not from the worst. A higher-quality kernel is not a
+ *                 way out: it is worse on both counts.
+ *
  * These are regression thresholds, NOT a perceptual-quality score. A number
  * below does not mean "looks acceptable to a human", and lossy compression is
  * by definition lossy.
@@ -118,11 +138,13 @@ const LIMITS = {
 	lossless: { mae: 0, max: 0, over: 0 },
 	balanced: {
 		normal: { mae: 4, max: 64, over: 6 },
-		hostile: { mae: 70, max: 220, over: 100 }
+		hostile: { mae: 70, max: 220, over: 100 },
+		downscaled: { mae: 8, max: 128, over: 6 }
 	},
 	maximum: {
 		normal: { mae: 4, max: 64, over: 6 },
-		hostile: { mae: 70, max: 255, over: 100 }
+		hostile: { mae: 70, max: 255, over: 100 },
+		downscaled: { mae: 8, max: 128, over: 6 }
 	}
 };
 
@@ -194,18 +216,56 @@ for (const mode of ['balanced', 'maximum']) {
 			if (!after?.length) return;
 
 			const hostile = !!spec.hostile;
-			const limit = LIMITS[mode][hostile ? 'hostile' : 'normal'];
 
 			for (const img of after) {
-				const original = before.find((b) => b.width === img.width && b.height === img.height);
+				/* Match each output image back to the image it replaced.
+				 *
+				 * An exact dimension match means the image was re-encoded but not
+				 * resized, and is compared directly. When the output is a DIFFERENT
+				 * size it was downscaled, and this used to `continue` - no row, no
+				 * assertion, no failure. Every resized image was therefore invisible
+				 * to this suite, including all 33 images of a real 32-page document,
+				 * so a count of "56 passed" could be reported while the images that
+				 * matter most went unexamined.
+				 *
+				 * So resize the original to the output's target with the same kernel
+				 * the pipeline used, and compare there. Both sides then pass through
+				 * identical resampling, which isolates the damage done by the
+				 * re-encode - what this suite is about - instead of charging the
+				 * resample's error to the encoder.
+				 *
+				 * Deliberately no bookkeeping of which originals were consumed:
+				 * several outputs may be identical copies of one original, and each
+				 * still has to be compared against it.
+				 */
+				let original = before.find((b) => b.width === img.width && b.height === img.height);
+				let resized = false;
+
+				if (!original) {
+					const ratio = img.width / img.height;
+					original = [...before].sort(
+						(x, y) => Math.abs(x.width / x.height - ratio) - Math.abs(y.width / y.height - ratio)
+					)[0];
+					resized = true;
+				}
 				if (!original) continue;
 
-			const unwrap = async (im) => (im.encoding === 'flate-jpeg' ? await zip.inflate(im.data) : im.data);
-			const a = await codec.decode(await unwrap(original));
-			const b = await codec.decode(await unwrap(img));
+				const unwrap = async (im) => (im.encoding === 'flate-jpeg' ? await zip.inflate(im.data) : im.data);
+				let a = await codec.decode(await unwrap(original));
+				if (resized) a = await codec.resize(a, img.width, img.height);
+				const b = await codec.decode(await unwrap(img));
 				const r = compareRasters(a, b);
 				assert(!r.sizeMismatch, `size changed unexpectedly: ${r.note}`);
-				rows.push({ fixture: name, mode, ...r });
+				rows.push({ fixture: name, mode, resized, ...r });
+
+				if (MEASURE_ONLY) continue;
+
+				/* Chosen per image, not per fixture: a fixture may hold images
+				 * that were re-encoded only and others that were also downscaled,
+				 * and those are different measurements. Hostile content dominates,
+				 * because no encoder can preserve it, so it keeps its own bound
+				 * even when the image was downscaled. */
+				const limit = resized ? LIMITS[mode][hostile ? 'hostile' : 'downscaled'] : LIMITS[mode][hostile ? 'hostile' : 'normal'];
 
 				if (MEASURE_ONLY) continue;
 
@@ -251,7 +311,11 @@ for (const r of rows) {
 	}
 }
 report('');
-report(`${passed} passed, ${failed} failed, ${rows.length} raster comparisons`);
+const downscaled = rows.filter((r) => r.resized).length;
+report(
+	`${passed} passed, ${failed} failed, ${rows.length} raster comparisons ` +
+		`(${downscaled} compared against a downscaled original)`
+);
 if (failures.length) {
 	report('\nFailures:');
 	for (const f of failures) report(`  - ${f}`);

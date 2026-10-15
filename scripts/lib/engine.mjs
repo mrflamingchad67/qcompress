@@ -13,6 +13,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
 import path from 'node:path';
 
+import { RESIZE_OPTIONS } from '../../src/lib/qpdf/pipeline.ts';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..', '..');
 
@@ -163,7 +165,7 @@ export async function makeCodec() {
 			return new Uint8Array(await encode(image, { quality }));
 		},
 		async resize(image, width, height) {
-			return await resize(image, { width, height });
+			return await resize(image, { ...RESIZE_OPTIONS, width, height });
 		}
 	};
 }
