@@ -24,6 +24,9 @@ Not run directly.
 | `named-build.mjs` | PDF builder with symbolic `${objectName}` references, so fixtures cannot end up with dangling references. |
 | `fixture-manifest.mjs` | **What each fixture is and what must happen to it.** The single source of truth; adding a fixture without an entry here fails the suite. |
 | `compare.mjs` | Semantic diff between two PDFs. Object numbers are never compared — a changed number is not a defect; a missing page is. |
+| `visual.mjs` | Page-level visual comparator: metrics, geometry checks, mode policies. Pure, so the Node unit tests and the browser renderer share one implementation. |
+| `render.mjs` | Runs PDF.js inside Chromium and compares rendered pages. Serves its own blank page; does not need the app built. |
+| `visual-page.mjs` | The in-page half of the renderer. Loaded by Chromium; owns the PDF.js document and canvas lifecycle. |
 
 ## `generate/`
 
@@ -46,6 +49,26 @@ Run through the package scripts; running one directly works too.
 | `test-pipeline.mjs` | `bun run test:pipeline` | orchestrator contracts, savings corpus |
 | `test-integrity.mjs` | `bun run test:integrity` | structural + semantic preservation, all fixtures |
 | `test-fidelity.mjs` | `bun run test:fidelity` | decoded-pixel fidelity (`--measure` to print the table) |
+| `test-visual-comparator.mjs` | `bun run test:visual-comparator` | the visual comparator's own logic, plus negative controls. No browser, no rendering, runs in a second. |
+| `test-visual.mjs` | `bun run test:visual` | rendered-page comparison of original vs compressed, per fixture per mode |
+
+### Visual regression
+
+`test-visual-comparator` runs in a second and needs nothing but Bun: it proves
+the comparator and policy logic respond correctly at known boundaries,
+including at boundaries that **must** fail.
+
+`test-visual` is the slow one. It starts Chromium, renders the original and the
+compressed output of every fixture through the same pinned PDF.js, and compares
+them page by page. It needs Chromium (Playwright) and `pdfjs-dist`, both
+dev-only. Run `--measure` to print the metric table without asserting — that is
+how the thresholds in `visual.mjs` were calibrated. Run `--diagnose` to write
+`original | candidate | difference` PNGs to `.visual-diagnostics/` when a page
+fails; the directory is removed again unless you ask for it.
+
+It found a real bug: deduplication was blanking pages while every other suite
+called the output correct. See the README section "The bug only rendering could
+find".
 | `test-browser.mjs` | `bun run test:browser` | real Chromium |
 | `test-live.mjs` | `bun run test:live` | the deployed site |
 
@@ -58,6 +81,7 @@ Run through the package scripts; running one directly works too.
 | `bun run explain <file.pdf> [mode]` | **Why a document did or did not shrink**, image by image |
 | `bun run verify:live-file <file.pdf> [mode]` | Run a real document against the deployed site |
 | `bun run screenshots` | Capture every UI state to `.screenshots/` |
+| `pwsh scripts/tools/set-defender-exclusions.ps1` | Quiet Defender during heavy builds (self-elevates; `-Remove` undoes it). Windows-only, needs admin. |
 
 `explain` is the one to reach for when a real document comes back with a tiny
 saving: it prints every image, whether it was eligible, and if not the reason.

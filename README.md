@@ -1,4 +1,4 @@
-# PDF Compressor
+# QCompress
 
 A minimal, browser-based PDF compressor. The PDF is read, compressed and
 packaged **entirely on the visitor's device** using QPDF compiled to
@@ -210,6 +210,37 @@ The browser has no `zlib`, so the unwrapping uses the platform's native
 `CompressionStream` / `DecompressionStream` — no dependency, no bundle weight.
 Both paths have dedicated browser tests.
 
+### The bug only rendering could find
+
+A fourth defect, found by the page-level visual suite rather than by any fixture
+or byte comparison: **Lossless was silently blanking pages.**
+
+`graphic-q75.pdf` page 2, and pages 2 and 3 of `scan-300dpi-q80.pdf`, rendered
+**completely blank** — 0.000% ink against an original 50% / 99.99% — while
+passing `qpdf --check`, all 288 structural assertions, and the image fidelity
+suite — all of which are still there and still pass. The image payloads that
+survived were byte-identical; nothing about the
+file was malformed. Every existing check was correct about what it measured, and
+none of them measured whether the page still had anything on it.
+
+Deduplication collapsed a duplicate image object but deleted its definition
+instead of repointing the reference to it, so the page kept
+`/Im0 8 0 R` while object 8 no longer existed and the image was never drawn.
+
+```
+ORIGINAL  obj 4 (page 2): /XObject << /Im0 8 0 R >>      obj 8: IMAGE
+OUTPUT    obj 4 (page 2): /XObject << /Im0 8 0 R >>      obj 8: gone
+```
+
+The obvious repair — leave object 8 in place holding `6 0 R` — is also wrong
+here, and fails the same way: the structural QPDF pass collapses such an alias
+down to a bare integer, leaving object 8 holding the number `6`, which resolves
+to nothing. The fix is to repoint every surviving reference at the kept copy
+and drop the duplicate outright.
+
+Savings were unaffected — marginally better, in fact, since no alias headers
+are kept. This is a correctness fix, not a compression trade.
+
 ### Before the orchestrator
 
 The engine before this was a single `qpdf` structural pass: **0.15%** over the
@@ -230,8 +261,14 @@ same fixtures, and it made **5 of 8 files larger**.
 | `bun run check` | Type checking | 0 errors, 0 warnings |
 | `bun run test:engine` | QPDF behaviour, options, exit codes | 32 passed, 5 skipped |
 | `bun run test:pipeline` | Orchestrator contracts on the savings corpus | 42 passed |
-| `bun run test:integrity` | **288 assertions** across all 37 fixtures | 288 passed |
+| `bun run test:integrity` | **290 assertions** across all 37 fixtures | 290 passed |
 | `bun run test:fidelity` | **57 raster comparisons**, decoded pixels | 56 passed |
+| `bun run test:visual-comparator` | Visual comparator logic + negative controls. No browser | 32 passed |
+| `bun run test:visual` | **150 page comparisons**, original vs compressed, rendered | 111 passed |
+
+The visual suite is included in `bun run test` because its runtime is reasonable
+(roughly a minute). It needs Chromium via Playwright, which `test:browser`
+already requires.
 | `bun run test:browser` | Real Chromium: UI, privacy, lazy loading, modes, wrapped/ICC images | 72 passed |
 | `bun run test:live` | The deployed site | 16 passed |
 | `bun run bench` | The numbers above | — |
@@ -256,26 +293,138 @@ compares input against output. Lossless is asserted to change none of it.
 > Object numbers are never compared. QPDF renumbers freely, and a changed
 > object number is not a defect; a missing page or a lost link is.
 
-**Visual fidelity** — `test-fidelity.mjs` decodes the image as it was in the
+**Image fidelity** — `test-fidelity.mjs` decodes the image as it was in the
 input and as it is in the output and compares the raster: mean absolute error,
 worst single-channel difference, and the share of channels differing by more
 than 32. Lossless is asserted **pixel-identical**, not merely close.
+
+**Page-level visual fidelity** — `test:visual` renders the original *and* the
+compressed output through the same pinned PDF.js, in the same browser, at the
+same scale, and compares the resulting pages. See below.
+
+### Page-level visual regression
+
+Image fidelity asks whether a photo survived re-encoding. It says nothing
+about the page that photo sits on. A document can keep every page, every object
+and every decoded image pixel, and still render differently — a font that
+stopped embedding, a heading that moved, a crop that appeared.
+
+`test:visual` closes that gap. For each fixture and each mode it renders both
+documents and compares page by page.
+
+**Why PDF.js, and why in a browser.** PDF.js is Mozilla's renderer — the same
+one Firefox uses to display PDFs — and it is pinned to `6.4.299` as a
+**devDependency**, so it costs the production bundle nothing. It runs inside the
+Chromium that Playwright already drives, rather than in Node: rendering in Node
+would need a native canvas binding, which is platform-specific and behaves
+differently on a Windows dev box than on the Linux CI runner. The trade-off is
+that this suite requires Chromium, and is skipped only by being unable to run,
+never by weakening an assertion.
+
+**What is measured.** Per page, on identical rasters:
+
+| Metric | Meaning |
+| --- | --- |
+| `changedPct` | % of pixels where any channel differs by more than `EPSILON` (2) |
+| `hardPct` | % of pixels differing by **≥ 96** — a saturated, high-contrast change |
+| `mae` | Mean absolute per-channel error, 0–255 |
+| `max` | Largest single-channel difference anywhere |
+| `norm` | `mae / 255`, normalised so page sizes stay comparable |
+
+`hardPct` exists because a whole-page mean is the wrong tool for localised
+damage. On a full-page photograph, `changedPct` reaches 65% while `hardPct`
+stays under 4% — every pixel drifts slightly. A blanked region or a dropped
+block instead produces a compact area of *maximal* deltas. The two metrics
+disagree exactly where it matters, so both are bounded.
+
+Page geometry (count, rendered size, MediaBox, rotation, blank pages) is
+checked **separately from** pixels, so a size mismatch is reported as a
+structural failure instead of being averaged into a similarity score.
+
+**Acceptance policy**, in `scripts/lib/visual.mjs`:
+
+* **`identical`** — Lossless, *and* any mode on a document with no eligible
+  image. Exact match, zero tolerance. Measured: all 50 lossless page
+  comparisons returned exactly `0.000` on every metric, which is what justifies
+  having no tolerance at all — PDF.js is deterministic.
+* **`lossy`** — Balanced and Maximum may re-encode JPEGs. Bounds were calibrated
+  from `bun run test:visual -- --measure`, not chosen:
+
+  | Group | `changedPct` | `hardPct` | `mae` | `max` | Worst fixture |
+  | --- | --- | --- | --- | --- | --- |
+  | normal | ≤ 70 | ≤ 5 | ≤ 16 | ≤ 250 | `oversized-600dpi` (65.03 / 3.92 / 14.59 / 239) |
+  | hostile | ≤ 80 | ≤ 8 | ≤ 20 | ≤ 255 | `jpeg-large` (15.84 / 0.86 / 5.07 / 187) |
+
+  `hostile` is *looser*, not tighter, because measurement did not support
+  tightening it — those fixtures are small images and move less of the page.
+
+Thresholds are regression bounds, not perceptual quality scores, and the
+acceptance policy never consults the candidate's own measured error.
+
+**Diagnostics.** `--diagnose` writes `original | candidate | difference` PNGs to
+`.visual-diagnostics/`, with high-contrast changes painted magenta. Only on
+request or on failure; the directory is deleted otherwise and is gitignored.
+
+**Negative controls** live in `test-visual-comparator.mjs` and are not
+optional — a suite that only ever reports passes cannot be distinguished from
+one broken to always pass. They prove identical rasters score zero, a 1-unit
+change is *not* a change, threshold boundaries hold exactly at and just past
+the limit, a lost heading is rejected, a 10% dropped block is caught by
+`hardPct` where `mae` passes, a blanked page fails even the loosest bound, and
+a shifted element, wrong dimensions, missing page, extra page and changed
+rotation are all detected.
+
+**The suite found a real bug.** `graphic-q75.pdf` page 2 rendered **blank**
+(0.000% ink) after Lossless, as did pages 2 and 3 of `scan-300dpi-q80.pdf` —
+while passing `qpdf --check`, all 288 structural assertions, and the image
+fidelity suite. Deduplication deleted a duplicate image object without
+repointing the page that referenced it, so the page drew nothing. The fix and
+the reasoning are in `src/lib/qpdf/dedupe.ts`; two regression tests were added
+to `test:integrity`.
 
 ### What is *not* verified
 
 Stated plainly rather than glossed over:
 
-* **No page-level rendering.** There is no PDF rasteriser in this toolchain, and
-  adding one purely for tests was judged not worth the dependency. Visual
-  checks therefore cover *images*, not composed pages: font rendering, text
-  positioning and page compositing are not compared visually. To check by hand,
-  run `bun run explain <file.pdf>` then open both files side by side.
-* **Extractable text is not compared.** Content streams are never rewritten, so
-  the risk is low, but it is not asserted.
+* **Damage smaller than ~5% of a photographic page is not detectable** by these
+  pixel metrics. On a page that is mostly image, a small blemish is diluted
+  past both `mae` and `hardPct`. This is a real limit of pixel comparison, not
+  a threshold that could be tuned away. Text and layout are covered instead by
+  the `identical` policy — every document with no eligible image is held to an
+  exact match, and those are the pages where text damage would show.
+* **Extractable text is not compared.** Rendering proves the page *looks* right,
+  not that the text layer is intact or selectable. A separate check would be
+  needed.
+* **Font behaviour is renderer-dependent.** Both sides share one renderer and
+  one font environment, so a difference means the PDF changed — but a document
+  relying on a font absent from this environment renders differently on a
+  machine that has it. PDF.js is pinned to reduce this; it is not eliminated.
 * **Digital signatures are not tested**, only disclosed as invalidated.
 * Optional content (layers) has no fixture; it is unverified.
-* Thresholds in `test-fidelity.mjs` are **regression bounds**, not a
-  perceptual-quality score. A number below does not mean "looks acceptable".
+* **Annotations are not rendered.** PDF.js is configured not to draw them, so a
+  changed annotation is caught structurally but not visually.
+* Thresholds in `test-fidelity.mjs` and `test:visual` are **regression bounds**,
+  not perceptual-quality scores. A number below does not mean "looks
+  acceptable".
+
+### CI behaviour
+
+`test:visual-comparator` and `test:integrity` both run in the deploy workflow.
+The comparator is the guard on the detector itself — if it ever stopped
+detecting, the rendered-page suite would go green while proving nothing.
+`test:visual` itself is **not** in CI: it needs Chromium, which the runner
+would have to install on every push. It runs in `bun run test` locally and is
+the gate before a release. Playwright can be provisioned with
+`bunx playwright install --with-deps chromium` if you want it in CI too.
+
+### Upgrading PDF.js
+
+Pinned deliberately. A version change alters rendering and can invalidate every
+threshold. To upgrade: change the pin, then run
+`bun run test:visual-comparator && bun run test:visual -- --measure`. Compare
+the `--measure` table against the calibration table above. A regression in
+`identical` (anything above exactly 0.000) is a **real** rendering difference,
+not threshold drift — investigate it before touching a bound.
 
 ---
 
@@ -427,7 +576,7 @@ card, then a compact working view. There is no file tray — the selected file i
 shown in the drop card itself, and the footer is only a meta bar.
 
 ```
-┌ PDF Compressor ────────────────────────────── (small wordmark)
+┌ QCompress ─────────────────────────────────────── (small wordmark)
 │
 │      ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
 │      │           (upload)            │   empty state — dashed card
@@ -436,7 +585,7 @@ shown in the drop card itself, and the footer is only a meta bar.
 │      └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
 │   Compressed in your browser. Nothing is uploaded.
 │
-│  ┌ PDF Compressor ──────────────────────────────
+│  ┌ QCompress ───────────────────────────────────────
 │  [ file.pdf · 30 KB · 8 pages ]          after a file is chosen the same
 │           [ Compress PDF ]              element collapses to a file row
 │  MODE
@@ -510,6 +659,28 @@ rg -o 'name:`[a-z0-9-]+`,size:24,node:\[\[' build/_app/immutable -r '' | sort -u
 
 ---
 
+## Page-level visual regression
+
+Rendered pages are compared directly, not just structure and image payloads.
+See [Test suite](#test-suite) for metrics, thresholds and negative controls.
+
+Quick reference:
+
+```bash
+bun run test:visual-comparator      # comparator logic + negative controls (1s, no browser)
+bun run test:visual                 # render and compare every fixture x mode
+bun run test:visual:measure         # print the metric table, assert nothing
+bun run test:visual -- --diagnose   # write diff PNGs on failure
+```
+
+PDF.js is pinned to **6.4.299** and is a **devDependency** — it is never
+bundled and never reaches the deployed site.
+
+`test:visual` is the slowest suite here, because it renders every fixture in
+every mode through a real browser. Expect roughly a minute, and expect Chromium
+processes to appear while it runs. On a busy machine `bun run test:visual --
+<fixture.pdf>` narrows it to the fixtures you care about.
+
 ## Project layout
 
 ```
@@ -543,8 +714,11 @@ scripts/
   lib/fixture-manifest.mjs what each fixture is and what must happen to it
   lib/compare.mjs          semantic diff between two PDFs
   lib/engine.mjs           QPDF runner + jSquash codec + zlib for Node/Bun tests
+  lib/visual.mjs           visual comparator: metrics, geometry, mode policies
+  lib/render.mjs           PDF.js-in-Chromium rendering harness
+  lib/visual-page.mjs      in-page half of the renderer
   generate/                fixture generators (see scripts/README.md)
-  test/                    the six suites
+  test/                    the suites
   tools/                   benchmarks, explain, screenshots
   probe/                   one-off engine investigations
   fixtures/                37 committed PDFs; see scripts/FIXTURES.md
@@ -554,7 +728,6 @@ scripts/
 
 The entry points are all named in `package.json`; `scripts/README.md` explains
 what each one is for.
-```
 
 ### How the image path works
 
@@ -594,6 +767,10 @@ valid JPEG data.
 | `bun run test:pipeline` | Orchestrator contracts on the savings corpus |
 | `bun run test:integrity` | Structural + semantic preservation across all fixtures |
 | `bun run test:fidelity` | Decoded-pixel fidelity for the lossy modes |
+| `bun run test:visual-comparator` | Visual comparator logic + negative controls (no browser) |
+| `bun run test:visual` | Rendered-page comparison, original vs compressed, per mode |
+| `bun run test:visual -- --measure` | Print every measured page metric, assert nothing |
+| `bun run test:visual -- --diagnose` | Write original / candidate / diff PNGs on failure |
 | `bun run test:browser` | Build + verify the real UI in Chromium |
 | `bun run test:live` | Verify the deployed site end-to-end |
 | `bun run test` | All of the above |

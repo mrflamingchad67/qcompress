@@ -2,5 +2,6 @@ node_modules/
 build/
 .svelte-kit/
 .screenshots/
+.visual-diagnostics/
 .DS_Store
 *.log

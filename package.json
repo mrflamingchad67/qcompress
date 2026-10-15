@@ -19,10 +19,13 @@
     "test:pipeline": "bun scripts/test/test-pipeline.mjs",
     "test:integrity": "bun scripts/test/test-integrity.mjs",
     "test:fidelity": "bun scripts/test/test-fidelity.mjs",
+    "test:visual-comparator": "bun scripts/test/test-visual-comparator.mjs",
+    "test:visual": "bun scripts/test/test-visual.mjs",
+    "test:visual:measure": "bun scripts/test/test-visual.mjs --measure",
     "test:browser": "bun run build && bun scripts/test/test-browser.mjs",
     "test:live": "bun scripts/test/test-live.mjs",
     "screenshots": "bun run build && bun scripts/tools/screenshots.mjs",
-    "test": "bun run check && bun run test:engine && bun run test:pipeline && bun run test:integrity && bun run test:fidelity && bun run test:browser"
+    "test": "bun run check && bun run test:engine && bun run test:pipeline && bun run test:integrity && bun run test:fidelity && bun run test:visual-comparator && bun run test:visual && bun run test:browser"
   },
   "imports": {
     "#lib/*": "./src/lib/*"
@@ -31,6 +34,7 @@
     "@sveltejs/adapter-static": "^4.0.0",
     "@sveltejs/kit": "^3.0.1",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "pdfjs-dist": "6.4.299",
     "playwright": "^1.64.0",
     "svelte": "^5.57.2",
     "svelte-check": "^4.3.1",

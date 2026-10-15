@@ -358,6 +358,74 @@ await test('deduplication is never applied to content streams', async () => {
 	assert(!result.bytes || result.duplicatesReplaced === 0, 'dedupeStreams merged a content stream');
 });
 
+/**
+ * Every object a page's resource dictionary points at must still exist.
+ *
+ * Regression test for a real defect found by the visual-regression stage.
+ * Deduplication used to delete a duplicate image object's definition without
+ * repointing the page that referenced it, so page 2 kept `/Im0 8 0 R` while
+ * object 8 no longer existed. The page then drew nothing at all - and the file
+ * still passed `qpdf --check`, every structural assertion, and the image
+ * fidelity suite, because the image payloads that survived were untouched and
+ * nothing about the file was malformed. Only rendering the page showed it.
+ *
+ * This is the cheap structural version of that check: no renderer needed, and
+ * it fails the moment a reference dangles.
+ */
+await test('deduplication leaves no dangling resource references', async () => {
+	for (const name of ['graphic-q75.pdf', 'scan-300dpi-q80.pdf', 'shared-image.pdf']) {
+		const bytes = await load(name);
+		const res = await optimize({ bytes, mode: 'lossless' }, runner, codec);
+		const text = await flatten(res.bytes);
+
+		// Every object defined in the file.
+		const defined = new Set([...text.matchAll(/(?:^|[\s>])(\d+) 0 obj\b/g)].map((m) => Number(m[1])));
+
+		// Every object a page's /XObject dictionary refers to.
+		// `flatten()` expands object streams, so references and definitions are
+		// both visible as plain text. Page dictionaries nest (`/Resources
+		// << /XObject << ... >> >>`), so match the whole page object and then
+		// find /XObject inside it, rather than assuming a fixed depth.
+		const refs = [];
+		for (const page of text.matchAll(/(?:^|[\s>])(\d+) 0 obj\s*<<([\s\S]*?)\/Type\s*\/Page\b([\s\S]*?)>>/g)) {
+			const body = `${page[2]}${page[3]}`;
+			if (/\/Type\s*\/Pages\b/.test(body)) continue;
+			const xo = /\/XObject\s*<<([^>]*)>>/.exec(body);
+			if (!xo) continue;
+			for (const m of xo[1].matchAll(/(?:^|[\s/])([A-Za-z0-9_]+)\s+(\d+)\s+0\s+R/g)) {
+				refs.push({ key: m[1], num: Number(m[2]) });
+			}
+		}
+
+		assert(refs.length > 0, `${name}: found no /XObject reference to check (parser may have changed shape)`);
+		for (const r of refs) {
+			assert(
+				defined.has(r.num),
+				`${name}: a page references /${r.key} ${r.num} 0 R but object ${r.num} does not exist`
+			);
+		}
+	}
+});
+
+await test('deduplication repoints references instead of leaving alias objects', async () => {
+	// An alias object (`8 0 obj` whose body is just `6 0 R`) is the obvious way
+	// to express a dedupe, and it is wrong here: the structural qpdf pass
+	// collapses such an object down to a bare integer, leaving object 8 holding
+	// the number `6`, which resolves to nothing. The output must contain no
+	// reference-only objects at all.
+	const bytes = await load('graphic-q75.pdf');
+	const res = await optimize({ bytes, mode: 'lossless' }, runner, codec);
+	const text = await flatten(res.bytes);
+
+	for (const m of text.matchAll(/(?:^|[\s>])(\d+) 0 obj\s*(\d+)\s+0\s+R\s*endobj/g)) {
+		assert(
+			false,
+			`object ${m[1]} is an alias to ${m[2]} rather than a real object; the structural ` +
+				'pass collapses these and the referencing page loses its content'
+		);
+	}
+});
+
 /* ── 8. lossy modes: only eligible images change ──────────────────────────────── */
 
 setSection('[8] lossy modes re-encode only eligible images, and the result still decodes');

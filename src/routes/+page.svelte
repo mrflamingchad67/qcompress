@@ -209,7 +209,7 @@
 </script>
 
 <svelte:head>
-	<title>PDF Compressor</title>
+	<title>QCompress</title>
 </svelte:head>
 
 <!-- data-stage exposes the worker state machine for debugging and e2e tests. -->
@@ -222,7 +222,7 @@
 				<path d="M17 8v6h6z" fill="rgba(0,0,0,.18)" />
 			</svg>
 		</span>
-		PDF Compressor
+		QCompress
 	</h1>
 
 	<!-- ── file selection ──────────────────────────────────────────────── -->

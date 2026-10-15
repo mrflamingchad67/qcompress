@@ -133,7 +133,7 @@ async function processedBytes(page) {
 console.log('\n[1] initial render');
 {
 	const { page, context } = await newPage();
-	check('title', (await page.title()) === 'PDF Compressor');
+	check('title', (await page.title()) === 'QCompress');
 	check('dropzone visible', await page.isVisible('.drop'));
 	check('dropzone is the primary element', await page.isVisible('.drop-title'));
 	check('no options before a file is chosen', !(await page.isVisible('fieldset.options')));

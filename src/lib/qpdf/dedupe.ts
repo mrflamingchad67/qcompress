@@ -182,23 +182,43 @@ export function dedupeStreams(text: string): DedupeResult {
 		return { ...empty, objectsInspected: candidates.length };
 	}
 
-	// Rewrite each duplicate as a bare indirect reference. Work back to front so
-	// the offsets of the objects still to be handled stay valid.
+	// Drop each duplicate's definition outright. Work back to front so the
+	// offsets of the objects still to be handled stay valid.
 	replacements.sort((a, b) => b.obj.offset - a.obj.offset);
 
 	let out = text;
 	let bytesSaved = 0;
-	for (const { obj, keepNum } of replacements) {
-		// Keep the original spacing up to `endobj` so the object stays
-		// recognisable, and drop the dictionary and payload entirely.
+	for (const { obj } of replacements) {
 		const endObjIdx = out.indexOf('endobj', obj.dataStart + obj.length);
 		if (endObjIdx === -1) continue;
 
-		const before = obj.offset;
-		const stub = `${obj.num} 0 R`;
-		const rebuilt = out.slice(0, before) + stub + out.slice(endObjIdx);
+		const rebuilt = out.slice(0, obj.offset) + out.slice(endObjIdx);
 		bytesSaved += out.length - rebuilt.length;
 		out = rebuilt;
+	}
+
+	// Repoint every surviving reference at the copy that was kept.
+	//
+	// The obvious alternative - leave `8 0 obj` in place holding `6 0 R`, so
+	// pages keep pointing at 8 - does NOT survive this pipeline. The structural
+	// qpdf pass collapses such an alias to a bare integer, leaving object 8
+	// holding the number `6`, which resolves to nothing. The page then draws no
+	// image at all, while the file stays structurally valid.
+	//
+	// Deleting first and repointing afterwards matters: deleting shrinks the
+	// text, and a reference to a duplicate can sit anywhere (a page dictionary
+	// near the start pointing at an image object near the end). Repointing once
+	// the offsets no longer matter is order-independent.
+	//
+	// A single combined pass, so a number that is itself remapped is never
+	// rewritten twice. `keepNum` is always the first object in its bucket and a
+	// duplicate never points at another duplicate, so the mapping cannot chain.
+	const remap = new Map(replacements.map((r) => [r.obj.num, r.keepNum]));
+	if (remap.size) {
+		out = out.replace(/(^|[^0-9])(\d+) 0 R(?![0-9])/g, (match, prefix, num) => {
+			const to = remap.get(Number(num));
+			return to === undefined ? match : `${prefix}${to} 0 R`;
+		});
 	}
 
 	if (bytesSaved <= 0) return { ...empty, objectsInspected: candidates.length };

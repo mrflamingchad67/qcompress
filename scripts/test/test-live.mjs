@@ -50,7 +50,7 @@ page.on('pageerror', (e) => errors.push(String(e)));
 await page.goto(BASE, { waitUntil: 'load', timeout: 120_000 });
 await page.waitForSelector('.drop-title', { timeout: 60_000 });
 check('app boots from the live origin', true);
-check('title', (await page.title()) === 'PDF Compressor', await page.title());
+check('title', (await page.title()) === 'QCompress', await page.title());
 check('footer source link', (await page.getAttribute('a.source', 'href')) === 'https://github.com/mrflamingchad67/qcompress');
 
 // --- compress a real document ---------------------------------------------

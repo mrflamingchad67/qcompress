@@ -41,6 +41,18 @@ jobs:
       - name: Verify the engine still compresses
         run: bun run test:engine
 
+      # The comparator needs no browser and runs in about a second. It is the
+      # guard on the visual regression suite's own logic: if the detector ever
+      # stops detecting, the rendered-page suite below would go green while
+      # proving nothing.
+      - name: Verify the visual comparator and its negative controls
+        run: bun run test:visual-comparator
+
+      # Catches the class of defect that passes every structural check:
+      # deduplication blanking a page while the file stays valid.
+      - name: Verify structural and semantic preservation
+        run: bun run test:integrity
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: build
