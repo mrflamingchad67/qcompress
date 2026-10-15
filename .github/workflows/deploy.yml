@@ -105,6 +105,17 @@ jobs:
           fi
           echo "Credentials present; publishing."
 
+      # Required. Each job gets a fresh runner, and `upload-pages-artifact`
+      # packages the site rather than leaving a `build/` directory on disk, so
+      # the deploy job starts with no `build/` at all. Without this, wrangler
+      # fails with ENOENT on `scandir .../build` - which was masked for two
+      # releases by the credential error firing first.
+      - name: Fetch the built site
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          path: build
+
       - name: Deploy to Cloudflare Pages
         id: deployment
         uses: cloudflare/wrangler-action@v3
