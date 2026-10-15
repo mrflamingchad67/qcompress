@@ -122,4 +122,11 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy build --project-name=qcompress --branch=main
+          # No --branch. This is a Direct Upload project, not a Git one, so it has no
+          # production branch configured. Passing --branch made Pages classify
+          # every publish as a PREVIEW: the site came back with
+          # x-robots-tag: noindex, and the _headers rules were ignored, so
+          # hashed assets got 7-day caching instead of immutable and the
+          # X-Frame-Options and Referrer-Policy headers never arrived.
+          # Omitting it targets production directly.
+          command: pages deploy build --project-name=qcompress
