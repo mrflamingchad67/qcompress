@@ -130,7 +130,7 @@ export interface OptimizeResult {
 	imageSkips: { reason: string; count: number }[];
 	/** True when no candidate beat the original. */
 	fallback: boolean;
-	candidates: { name: string; bytes: number; valid: boolean; lossy: boolean; rejected?: string }[];
+	candidates: { name: string; bytes: number; valid: boolean; lossy: boolean; rejected?: string; ms: number }[];
 }
 
 /* ── validation ──────────────────────────────────────────────────────────── */
@@ -544,6 +544,10 @@ function summarise(c: Candidate) {
 		bytes: c.bytes ? c.bytes.length : 0,
 		valid: c.valid,
 		lossy: c.lossy,
-		rejected: c.rejected
+		rejected: c.rejected,
+		// Already measured by `remember`; previously discarded. Forwarded so the
+		// pipeline can explain where its time went - `bun run profile` reads it.
+		// Observability only: nothing selects on this.
+		ms: c.ms
 	};
 }
