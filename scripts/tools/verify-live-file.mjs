@@ -5,22 +5,34 @@
  * in a real browser against the real origin. It is deliberately not a unit test
  * - it reports what a user would see.
  *
- * Usage: bun scripts/tools/verify-live-file.mjs <file.pdf> [mode]
+ * Usage: bun scripts/tools/verify-live-file.mjs <file.pdf> [mode] [url] [--save <path>]
+ *
+ * `--save <path>` writes the downloaded output to disk. Needed because the
+ * browser's result is not size-reproducible: reading sizes off this report is
+ * not enough to locate the difference, so two runs must be diffed as bytes.
+ * This changes capture only - the compression pipeline is untouched.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..', '..', 'build');
 
-const file = process.argv[2];
-const mode = process.argv[3] ?? 'maximum';
-const BASE = process.argv[4] ?? 'https://qcompress.pages.dev';
+const argv = process.argv.slice(2);
+const saveIdx = argv.indexOf('--save');
+const saveTo = saveIdx !== -1 ? argv[saveIdx + 1] : null;
+const positional = argv.filter(
+	(a, i) => !a.startsWith('--') && !(saveIdx !== -1 && i === saveIdx + 1)
+);
+
+const file = positional[0];
+const mode = positional[1] ?? 'maximum';
+const BASE = positional[2] ?? 'https://qcompress.pages.dev';
 if (!file) {
-	console.log('\nusage: bun scripts/tools/verify-live-file.mjs <file.pdf> [mode] [url]\n');
+	console.log('\nusage: bun scripts/tools/verify-live-file.mjs <file.pdf> [mode] [url] [--save <path>]\n');
 	process.exit(2);
 }
 
@@ -93,6 +105,11 @@ const downloaded = Buffer.concat(chunks);
 
 out(`  download: ${downloaded.length} B  (${(((bytes.length - downloaded.length) / bytes.length) * 100).toFixed(1)}% smaller)`);
 out(`  header  : ${downloaded.subarray(0, 5).toString() === '%PDF-' ? 'valid PDF' : 'NOT A PDF'}`);
+
+if (saveTo) {
+	await writeFile(saveTo, downloaded);
+	out(`  saved   : ${saveTo}`);
+}
 
 await browser.close();
 server.close();

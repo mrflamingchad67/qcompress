@@ -25,6 +25,8 @@ Not run directly.
 | `fixture-manifest.mjs` | **What each fixture is and what must happen to it.** The single source of truth; adding a fixture without an entry here fails the suite. |
 | `compare.mjs` | Semantic diff between two PDFs. Object numbers are never compared — a changed number is not a defect; a missing page is. |
 | `visual.mjs` | Page-level visual comparator: metrics, geometry checks, mode policies. Pure, so the Node unit tests and the browser renderer share one implementation. |
+| `textlayer.mjs` | Content-stream tokenizer and text-payload extractor. Reuses `structure.ts` for page traversal; inflate is injected, so no dependency and no Node-only API. |
+| `textcompare.mjs` | Compares two text signatures and produces the failure diagnostics. |
 | `render.mjs` | Runs PDF.js inside Chromium and compares rendered pages. Serves its own blank page; does not need the app built. |
 | `visual-page.mjs` | The in-page half of the renderer. Loaded by Chromium; owns the PDF.js document and canvas lifecycle. |
 
@@ -51,6 +53,21 @@ Run through the package scripts; running one directly works too.
 | `test-fidelity.mjs` | `bun run test:fidelity` | decoded-pixel fidelity (`--measure` to print the table) |
 | `test-visual-comparator.mjs` | `bun run test:visual-comparator` | the visual comparator's own logic, plus negative controls. No browser, no rendering, runs in a second. |
 | `test-visual.mjs` | `bun run test:visual` | rendered-page comparison of original vs compressed, per fixture per mode |
+| `test-text-extract.mjs` | `bun run test:text-extract` | content-stream tokenizer grammar + comparator controls. No engine, no browser. |
+| `test-text-integrity.mjs` | `bun run test:text-integrity` | text payload preserved per page, per mode, through the real pipeline |
+
+### Text-layer preservation
+
+`test:text-extract` is the fast one — pure grammar and comparison rules, no PDF
+and no browser. It is where the tokenizer's handling of escapes, hex strings,
+comments, nested arrays and inline images is pinned down, and where the
+comparator is proven to reject a changed, missing, added or reordered string.
+
+`test-text-integrity` runs the real compressor over every fixture in every mode
+and compares the extracted text payload page by page. Its negative controls
+corrupt **actual fixture PDFs** and assert the result still passes `qpdf --check`,
+so they prove text detection rather than merely proving qpdf rejects broken
+files.
 
 ### Visual regression
 

@@ -263,6 +263,8 @@ same fixtures, and it made **5 of 8 files larger**.
 | `bun run test:pipeline` | Orchestrator contracts on the savings corpus | 42 passed |
 | `bun run test:integrity` | **290 assertions** across all 37 fixtures | 290 passed |
 | `bun run test:fidelity` | **57 raster comparisons**, decoded pixels | 56 passed |
+| `bun run test:text-extract` | Text extractor grammar + comparator controls | 47 passed |
+| `bun run test:text-integrity` | **150 page comparisons**, text payload per mode | 115 passed |
 | `bun run test:visual-comparator` | Visual comparator logic + negative controls. No browser | 32 passed |
 | `bun run test:visual` | **150 page comparisons**, original vs compressed, rendered | 111 passed |
 
@@ -392,9 +394,13 @@ Stated plainly rather than glossed over:
   a threshold that could be tuned away. Text and layout are covered instead by
   the `identical` policy — every document with no eligible image is held to an
   exact match, and those are the pages where text damage would show.
-* **Extractable text is not compared.** Rendering proves the page *looks* right,
-  not that the text layer is intact or selectable. A separate check would be
-  needed.
+* **Extractable text is compared, but only as font-encoded bytes.** See
+  [Text-layer preservation](#text-layer-preservation) below. The ordered string
+  payloads handed to `Tj` / `TJ` / `'` / `"` are compared byte-for-byte per page,
+  but those bytes are *not* Unicode — mapping them to characters needs the
+  font's encoding and its `/ToUnicode` CMap, neither of which is consulted.
+  So this proves nothing is dropped or altered; it does not prove correct text
+  extraction, reading order, or accessibility.
 * **Font behaviour is renderer-dependent.** Both sides share one renderer and
   one font environment, so a difference means the PDF changed — but a document
   relying on a font absent from this environment renders differently on a
@@ -659,6 +665,99 @@ rg -o 'name:`[a-z0-9-]+`,size:24,node:\[\[' build/_app/immutable -r '' | sort -u
 
 ---
 
+## Text-layer preservation
+
+A page can render perfectly while its text has been destroyed underneath. Search
+finds nothing, copy yields nothing, a screen reader has nothing to read. Visual
+equality cannot see that, so the text layer is checked separately.
+
+**The invariant**
+
+> Compression must not remove or alter the ordered string payloads supplied to a
+> page's text-showing operators.
+
+The four operators inspected are `Tj`, `TJ`, `'` and `"`. The numeric
+positioning values inside a `TJ` array, and the two spacing numbers `"` takes,
+are **not** text and are excluded — they move glyphs, and the visual suite owns
+rendered position.
+
+**How it works** (`scripts/lib/textlayer.mjs`)
+
+1. Each document is flattened with `--object-streams=disable` and walked with the
+   existing `structure.ts` reader — the same page traversal the structural suite
+   uses, not a second parser.
+2. Each page's `/Contents` is resolved. Both shapes are supported: a single
+   stream, and an array of streams whose content is concatenated in order.
+3. Streams are inflated where `/FlateDecode` is present, using the same
+   `makeZip()` helper the image path uses. Any *other* filter is reported as
+   unsupported rather than guessed at — scanning still-encoded bytes for `Tj`
+   would manufacture operators that are not in the document.
+4. A real tokenizer parses the content stream. **Not a regex.** The bytes `Tj`
+   occur constantly inside JPEG data, comments and string literals; nine corpus
+   fixtures already contain `)` followed by `"` purely by accident inside image
+   payloads. A regex would report those as text-showing operators.
+
+The tokenizer handles delimiters, comments, literal strings with balanced
+parentheses and every escape form (including octal and backslash-newline
+continuation), hex strings with embedded whitespace and odd digit counts, arrays,
+numbers, names, dictionaries, and inline images — whose payload is skipped
+wholesale rather than scanned.
+
+**String normalization.** A literal string and a hex string representing the same
+bytes produce the same payload, so a candidate that re-spells a string is not
+reported as changed. Escapes are decoded per the PDF grammar. No font encoding is
+applied: the bytes are preserved as-is.
+
+**The signature and the equality rule.** Per page: the ordered text-showing
+operations, each with its decoded string segments (`TJ` keeps its segments
+distinct, so a removed segment is visible rather than absorbed), plus the
+concatenated bytes. Two pages match when **both** the concatenated bytes and the
+per-operation segment boundaries are identical.
+
+Requiring both is defensible for a specific reason: QCompress documents that it
+never rewrites content streams, so re-segmentation is not something this
+compressor does. A boundary difference with matching bytes would be a genuine
+finding. The rule was fixed **before** the corpus was run — changing it after a
+fixture failed would be fitting the test to the output.
+
+Comparison is direct byte comparison, never hash equality: a digest would be
+weaker evidence and harder to read when it fails.
+
+**No silent emptiness.** A page whose content could not be decoded is
+`unsupported`, never "no text". Conflating them is how corruption becomes a
+silent pass. An original page *with* text whose candidate yields none is a
+failure. An original page *without* text whose candidate also has none is a
+pass — a scanned or blank page is legitimate, and the requirement is
+preservation, not the presence of a text layer.
+
+**Coverage.** All 37 valid fixtures × all three modes: 111 document comparisons,
+150 page comparisons. 36 of those runs carry text, 75 are image-only or blank and
+are expected to carry none. The three deliberately-broken fixtures are excluded as
+not being renderable documents, each reason stated in code.
+
+**Negative controls.** `test:text-extract` covers the grammar (27 cases:
+escapes, octal, hex, comments, inline images, nested arrays, malformed input) and
+the comparator (20 cases: changed byte, removed string, shortened string, extra
+string, reordering, page count, empty candidate, page merging).
+`test:text-integrity` then corrupts **real fixture PDFs** and runs them through
+the identical path — and asserts the corrupted file still passes `qpdf --check`,
+so the control proves text detection rather than merely proving qpdf rejects
+broken files.
+
+**What this does NOT prove.** This is an operand-preservation regression suite,
+not an accessibility validator. Comparing these operands does **not** prove
+correct Unicode extraction, correct reading order, tagged-PDF correctness,
+preservation of `/ToUnicode` CMaps, or screen-reader support. Two documents with
+different encodings can render identically and differ here. Both suites are
+needed:
+
+| Visual | Text | Meaning |
+| --- | --- | --- |
+| Pass | Pass | Both checked properties preserved within their policies |
+| Pass | **Fail** | Looks right, text changed — reject the candidate |
+| **Fail** | Pass | Text intact, rendered output changed — existing visual policy |
+| Fail | Fail | Both invariants violated |
+
 ## Page-level visual regression
 
 Rendered pages are compared directly, not just structure and image payloads.
@@ -715,6 +814,8 @@ scripts/
   lib/compare.mjs          semantic diff between two PDFs
   lib/engine.mjs           QPDF runner + jSquash codec + zlib for Node/Bun tests
   lib/visual.mjs           visual comparator: metrics, geometry, mode policies
+  lib/textlayer.mjs        content-stream tokenizer + text-payload extractor
+  lib/textcompare.mjs      text-signature comparison and diagnostics
   lib/render.mjs           PDF.js-in-Chromium rendering harness
   lib/visual-page.mjs      in-page half of the renderer
   generate/                fixture generators (see scripts/README.md)
@@ -767,6 +868,8 @@ valid JPEG data.
 | `bun run test:pipeline` | Orchestrator contracts on the savings corpus |
 | `bun run test:integrity` | Structural + semantic preservation across all fixtures |
 | `bun run test:fidelity` | Decoded-pixel fidelity for the lossy modes |
+| `bun run test:text-extract` | Text extractor grammar + comparator negative controls (no engine, no browser) |
+| `bun run test:text-integrity` | Text payload preserved per page, per mode, across the corpus |
 | `bun run test:visual-comparator` | Visual comparator logic + negative controls (no browser) |
 | `bun run test:visual` | Rendered-page comparison, original vs compressed, per mode |
 | `bun run test:visual -- --measure` | Print every measured page metric, assert nothing |

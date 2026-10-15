@@ -270,30 +270,34 @@ export const GEOMETRY_TOLERANCE = { points: 0.01, pixels: 0 };
  *              heading or a shifted line on them.
  *
  *   lossy      Balanced and Maximum re-encode eligible JPEGs, which
- *              legitimately changes pixels. Bounds below were calibrated by
- *              measurement, not chosen - `bun run test:visual -- --measure`
- *              over 150 page comparisons:
+ *              legitimately changes pixels. Gated on `mae` and `hardPct` ONLY -
+ *              see the `lossy` entry below for why `changedPct` and `max` are
+ *              reported but not gated.
  *
- *                group    changed%  hard%   MAE    MAX    worst fixture
- *                normal      65.03   3.92  14.59   239    oversized-600dpi (maximum)
- *                normal      63.12   2.36  12.53   227    scan-300dpi-q80 (maximum)
- *                normal       1.04   0.00   0.17     8    photo-q90 (balanced)
- *                hostile     15.84   0.86   5.07   187    jpeg-large (maximum)
- *                hostile      6.96   0.57   3.58   109    mixed-aspect-images
+ *              Calibration sources: `bun run test:visual -- --measure` (150
+ *              fixture page comparisons) PLUS two real user documents. The real
+ *              documents are what actually settled these bounds, because the
+ *              fixtures alone produced numbers that failed on real input.
  *
- *              The worst case is a full-page photograph re-encoded at q55:
- *              nearly every pixel moves slightly, so `changedPct` reaches 65
- *              while `hardPct` stays under 4. The two metrics disagree exactly
- *              where it matters, which is the argument for keeping both.
+ *                source              hard%    MAE    notes
+ *                oversized-600dpi     3.92   14.59   fixture, maximum
+ *                scan-300dpi-q80      2.36   12.53   fixture, maximum
+ *                jpeg-large           0.86    5.07   fixture (hostile), maximum
+ *                real 32-page book    0.64    3.28   user document, maximum
+ *                real 10-page plan    0.00    0.48   user document, maximum
  *
- *              `hardPct` is bounded so it still discriminates. With MAE at 16,
- *              a loss of high-contrast content covering more than ~5% of a
- *              page escapes MAE but is caught by `hardPct`. That band is where
- *              a blanked region or a large dropped block lives. Note the limit
- *              this implies, stated plainly: on a page that is mostly
+ *              Bounds: hardPct 5 / mae 16 for normal, 8 / 20 for hostile.
+ *              `hardPct` is the one that discriminates - it sits near zero for
+ *              every page that merely drifted, and rises sharply the moment
+ *              content stops being drawn.
+ *
+ *              With MAE at 16, a loss of high-contrast content covering more
+ *              than ~5% of a page escapes MAE but is caught by `hardPct`. That
+ *              band is where a blanked region or a large dropped block lives.
+ *              The limit this implies, stated plainly: on a page that is mostly
  *              photograph, damage smaller than 5% of the area is NOT reliably
  *              detectable here, and the honest answer is that pixel metrics
- *              cannot see it. The `identical` policy is what covers that case.
+ *              cannot see it. The `identical` policy covers that case.
  *
  *   hostile    Retained because the corpus distinguishes those fixtures, but
  *              measurement did NOT justify a tighter page-level bound - the
@@ -311,10 +315,32 @@ export const VISUAL_POLICY = {
 		max: 0,
 		note: 'nothing on this page may change'
 	},
-	/** Balanced / Maximum. Bounded, calibrated from measurement. */
+	/**
+	 * Balanced / Maximum. Gated on `mae` and `hardPct` ONLY.
+	 *
+	 * `changedPct` and `max` are deliberately absent rather than set to
+	 * convenient values, because neither discriminates on lossy input:
+	 *
+	 *   changedPct  A real 32-page document re-encoded at q55 measures 89.8%
+	 *                changed on its worst page while `mae` is 1.7 and `hardPct`
+	 *                is 0.000. Nearly every pixel moved by about two levels:
+	 *                that is re-encoding, not damage. The metric is high
+	 *                precisely when the page is largest and most photographic,
+	 *                so any bound on it either fires on good output or is
+	 *                vacuous.
+	 *
+	 *   max         Reached 255 on that same real document - one pixel, at a
+	 *                high-contrast edge. Ordinary JPEG behaviour on a page of
+	 *                ~1M pixels. It never caught anything the other two missed.
+	 *
+	 * Both remain reported in the metric table, because they are useful when a
+	 * human reads a failure. They simply are not gates. A bound that cannot
+	 * fail is not a check, and a bound that fires on correct output trains
+	 * people to ignore the suite.
+	 */
 	lossy: {
-		normal: { group: 'lossy-normal', changedPct: 70, hardPct: 5, mae: 16, max: 250 },
-		hostile: { group: 'lossy-hostile', changedPct: 80, hardPct: 8, mae: 20, max: 255 }
+		normal: { group: 'lossy-normal', hardPct: 5, mae: 16 },
+		hostile: { group: 'lossy-hostile', hardPct: 8, mae: 20 }
 	}
 };
 
@@ -352,14 +378,16 @@ export function policyFor(mode, hostile, mayReencode = true) {
  */
 export function evaluate(metrics, policy) {
 	const violations = [];
-	const limit = (metric, value, max) => {
-		if (value > max) violations.push({ metric, value, limit: max });
-	};
 
-	limit('changedPct', metrics.changedPct, policy.changedPct);
-	limit('hardPct', metrics.hardPct, policy.hardPct);
-	limit('mae', metrics.mae, policy.mae);
-	limit('max', metrics.max, policy.max);
+	// Only bounds the policy actually declares are applied. The lossy policies
+	// omit `changedPct` and `max` on purpose - see VISUAL_POLICY - so this must
+	// skip absent keys rather than compare against undefined, which would make
+	// every comparison fail.
+	for (const metric of ['changedPct', 'hardPct', 'mae', 'max']) {
+		const bound = policy[metric];
+		if (typeof bound !== 'number') continue;
+		if (metrics[metric] > bound) violations.push({ metric, value: metrics[metric], limit: bound });
+	}
 
 	return { ok: violations.length === 0, violations };
 }

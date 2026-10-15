@@ -38,6 +38,23 @@ export interface RawObject {
 export interface PageSummary {
 	/** 1-based position in the page tree, which is also the display order. */
 	index: number;
+	/**
+	 * Object number of the page object itself, or null when unknown.
+	 *
+	 * Identity for *this* document only: QPDF renumbers freely, so this must
+	 * never be compared across two files. It exists so a reader can go back to
+	 * the object map and resolve the page's own entries (`/Contents`), which
+	 * the summary otherwise only reports as a boolean.
+	 */
+	objNum: number | null;
+	/**
+	 * Object numbers referenced by `/Contents`, in the order they appear.
+	 *
+	 * A page has one content stream, or `/Contents` is an array of streams whose
+	 * logical content is their concatenation in this order. Empty when the page
+	 * has no `/Contents`, which is legal for a genuinely blank page.
+	 */
+	contentsRefs: number[];
 	mediaBox: number[] | null;
 	cropBox: number[] | null;
 	rotate: number | null;
@@ -450,12 +467,12 @@ export function readStructure(bytes: Uint8Array | string): DocumentSummary {
 	const pages: PageSummary[] = [];
 	const visited = new Set<number>();
 
-	const walk = (dict: string | null, depth: number) => {
+	const walk = (dict: string | null, depth: number, objNum: number | null) => {
 		if (!dict || depth > 64 || pages.length > 20_000) return;
 
 		const kidsRaw = rawValue(dict, 'Kids');
 		if (kidsRaw === null) {
-			pages.push(readPage(dict, pages.length + 1, objects));
+			pages.push(readPage(dict, pages.length + 1, objects, objNum));
 			return;
 		}
 
@@ -470,7 +487,7 @@ export function readStructure(bytes: Uint8Array | string): DocumentSummary {
 			list = ci ? ci[1] : null;
 		}
 		if (list === null) {
-			pages.push(readPage(dict, pages.length + 1, objects));
+			pages.push(readPage(dict, pages.length + 1, objects, objNum));
 			return;
 		}
 
@@ -486,11 +503,11 @@ export function readStructure(bytes: Uint8Array | string): DocumentSummary {
 				pages.push(unreadablePage(pages.length + 1));
 				continue;
 			}
-			walk(child.dict, depth + 1);
+			walk(child.dict, depth + 1, num);
 		}
 	};
 
-	if (pagesDict) walk(pagesDict, 0);
+	if (pagesDict) walk(pagesDict, 0, null);
 	summary.pages = pages;
 	summary.pageCount = pages.length;
 
@@ -531,6 +548,8 @@ export function readStructure(bytes: Uint8Array | string): DocumentSummary {
 function unreadablePage(index: number): PageSummary {
 	return {
 		index,
+		objNum: null,
+		contentsRefs: [],
 		mediaBox: null,
 		cropBox: null,
 		rotate: null,
@@ -543,7 +562,12 @@ function unreadablePage(index: number): PageSummary {
 	};
 }
 
-function readPage(dict: string, index: number, objects: Map<number, RawObject>): PageSummary {
+function readPage(
+	dict: string,
+	index: number,
+	objects: Map<number, RawObject>,
+	objNum: number | null
+): PageSummary {
 	const annotSubtypes: string[] = [];
 	const linkUris: string[] = [];
 	let annotCount = 0;
@@ -573,6 +597,8 @@ function readPage(dict: string, index: number, objects: Map<number, RawObject>):
 
 	return {
 		index,
+		objNum,
+		contentsRefs: contentsRefsOf(dict, objects),
 		mediaBox: numbersOf(rawValue(dict, 'MediaBox')),
 		cropBox: numbersOf(rawValue(dict, 'CropBox')),
 		rotate: numOf(dict, 'Rotate'),
@@ -583,6 +609,30 @@ function readPage(dict: string, index: number, objects: Map<number, RawObject>):
 		hasContents: rawValue(dict, 'Contents') !== null,
 		unreadable: false
 	};
+}
+
+/**
+ * Object numbers behind `/Contents`, in logical order.
+ *
+ * `/Contents 5 0 R` is one stream. `/Contents [3 0 R 4 0 R]` is several whose
+ * content is concatenated in order, and the array itself is usually indirect
+ * (`/Contents 6 0 R` pointing at `[3 0 R 4 0 R]`), so both shapes are handled.
+ *
+ * Returns `[]` both for "no /Contents" and for "/Contents that could not be
+ * resolved" - the two are not distinguished here on purpose, because a caller
+ * that needs the difference must check the source object itself. Guessing a
+ * single stream from an unresolved array would risk reading the wrong bytes.
+ */
+function contentsRefsOf(dict: string, objects: Map<number, RawObject>): number[] {
+	const raw = rawValue(dict, 'Contents');
+	if (raw === null) return [];
+
+	const body = inlineArrayBody(raw) ?? inlineArrayBody(deref(raw, objects) ?? '');
+	if (body === null) {
+		const ref = refOf(raw);
+		return ref === null ? [] : [ref];
+	}
+	return [...body.matchAll(/(\d+)\s+\d+\s+R/g)].map((m) => parseInt(m[1], 10));
 }
 
 /** Inner text of an `[...]` token, or null if the value is absent or not an array. */
