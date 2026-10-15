@@ -122,11 +122,50 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # No --branch. This is a Direct Upload project, not a Git one, so it has no
-          # production branch configured. Passing --branch made Pages classify
-          # every publish as a PREVIEW: the site came back with
-          # x-robots-tag: noindex, and the _headers rules were ignored, so
-          # hashed assets got 7-day caching instead of immutable and the
-          # X-Frame-Options and Referrer-Policy headers never arrived.
-          # Omitting it targets production directly.
+          # No --branch. This is a Direct Upload project with no production
+          # branch configured, so omitting it targets production directly.
+          #
+          # This WAS added because the site appeared to be serving a preview:
+          # x-robots-tag: noindex was present and the _headers rules seemed to
+          # be ignored. Removing --branch did NOT change either. The real cause
+          # is still unestablished - see the verification step below, which now
+          # measures the deployed response instead of inferring it. Do not trust
+          # the earlier reasoning recorded in the roadmap about this.
           command: pages deploy build --project-name=qcompress
+
+      # A green deploy says the upload succeeded. It does not say the deployment
+      # behaves correctly - this workflow was green for a full run while the
+      # site returned headers nobody had looked at.
+      #
+      # Checked against the freshly created deployment, before any CDN has
+      # cached it. That vantage point matters: the production domain can only be
+      # read as `cf-cache-status: HIT`, which reports the cached response rather
+      # than what the deployment actually returns.
+      - name: Verify the deployment responds
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          echo "deployment: $PAGE_URL"
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$PAGE_URL/")
+          echo "GET / -> $status"
+          if [ "$status" != "200" ]; then
+            echo "::error::The deployment URL does not serve the site (HTTP $status)."
+            echo "The upload succeeded but the site is not reachable at its own deployment URL."
+            exit 1
+          fi
+          echo ""
+          echo "response headers:"
+          curl -sSI "$PAGE_URL/" | grep -Ei 'cache-control|x-frame-options|referrer-policy|x-robots-tag' || true
+          echo ""
+          # static/_headers sets immutable caching for hashed assets and adds two
+          # security headers. If it is not applied the site still works; assets
+          # are simply re-fetched far more often than intended.
+          missing=""
+          curl -sSI "$PAGE_URL/" | grep -qi 'x-frame-options' || missing="$missing x-frame-options"
+          curl -sSI "$PAGE_URL/" | grep -qi 'immutable'        || missing="$missing immutable-caching"
+          if [ -n "$missing" ]; then
+            echo "::warning::_headers is not being applied. Missing:$missing"
+            echo "The site still works. This is a caching and security-posture gap, not a break."
+          else
+            echo "_headers is being applied."
+          fi
