@@ -327,5 +327,123 @@ await save(
 	})
 );
 
+/* Composite fonts: Type0 with /Identity-H and a populated /ToUnicode ------
+ *
+ * The corpus had NO fixture with a composite font, so the entire Unicode layer
+ * was untestable: the text suite compares font-encoded bytes, which for a Type0
+ * font are CIDs that mean nothing without the CMap. A compressor that deleted
+ * every /ToUnicode in a document would have passed every existing suite.
+ *
+ * These carry real CID -> Unicode mappings in all three CMap forms, so the
+ * mapping can be checked for survival.
+ */
+
+/**
+ * A document using a Type0 font with /Identity-H encoding.
+ *
+ * `mappings` is a CMap body fragment; `codes` are the CIDs the content stream
+ * shows. No font program is embedded - the point is the CMap and the encoding,
+ * and qpdf does not require a FontFile to accept the document.
+ */
+function type0Pdf({ pages, cmapBody, codeSpaces, codes }) {
+	/* Object numbers are fixed BEFORE anything is built. Two earlier attempts
+	 * interleaved allocation with construction and collided: a page's
+	 * /Contents pointed at the Type0 font, so the CMap body landed in a
+	 * content-stream slot and the font referenced its own descendant. qpdf
+	 * --check accepted that file. Structural validity is not semantics. */
+	const CATALOG = 1;
+	const PAGES = 2;
+	const pageNum = Array.from({ length: pages }, (_, p) => 3 + p);
+	const contentNum = Array.from({ length: pages }, (_, p) => 3 + pages + p);
+	const FONT = 3 + 2 * pages;
+	const DESCENDANT = FONT + 1;
+	const TOUNICODE = FONT + 2;
+	const DESCRIPTOR = FONT + 3;
+
+	const objs = [];
+
+	objs[CATALOG - 1] = { dict: `<< /Type /Catalog /Pages ${PAGES} 0 R >>` };
+	objs[PAGES - 1] = {
+		dict: `<< /Type /Pages /Kids [${pageNum.map((n) => `${n} 0 R`).join(' ')}] /Count ${pages} >>`
+	};
+
+	for (let p = 0; p < pages; p++) {
+		const hex = codes
+			.map((c, i) => (c + i * 0).toString(16).padStart(4, '0').toUpperCase())
+			.join('');
+		objs[pageNum[p] - 1] = {
+			dict:
+				`<< /Type /Page /Parent ${PAGES} 0 R /MediaBox [0 0 612 792] ` +
+				`/Resources << /Font << /F1 ${FONT} 0 R >> >> /Contents ${contentNum[p]} 0 R >>`
+		};
+		objs[contentNum[p] - 1] = { dict: '<< >>', stream: `BT /F1 16 Tf 72 700 Td <${hex}> Tj ET\n` };
+	}
+
+	objs[FONT - 1] = {
+		dict:
+			`<< /Type /Font /Subtype /Type0 /BaseFont /QCFixture /Encoding /Identity-H ` +
+			`/DescendantFonts [${DESCENDANT} 0 R] /ToUnicode ${TOUNICODE} 0 R >>`
+	};
+	objs[DESCENDANT - 1] = {
+		dict:
+			`<< /Type /Font /Subtype /CIDFontType2 /BaseFont /QCFixture ` +
+			`/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> ` +
+			`/FontDescriptor ${DESCRIPTOR} 0 R /DW 600 >>`
+	};
+	objs[TOUNICODE - 1] = {
+		dict: '<< >>',
+		stream:
+			`/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n` +
+			`/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n` +
+			`/CMapName /QCFixture def\n/CMapType 2 def\n` +
+			codeSpaces +
+			cmapBody +
+			`endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n`
+	};
+	objs[DESCRIPTOR - 1] = {
+		dict:
+			'<< /Type /FontDescriptor /FontName /QCFixture /Flags 4 ' +
+			'/FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 ' +
+			'/CapHeight 700 /StemV 80 >>'
+	};
+
+	for (let i = 0; i < objs.length; i++) {
+		if (!objs[i]) throw new Error(`type0Pdf left object ${i + 1} unallocated`);
+	}
+
+	return buildPdf(objs);
+}
+
+{
+	// bfchar: one CID to one character.
+	const text = 'Hello QCompress';
+	const codes = [...text].map((_, i) => 0x0021 + i);
+	const cmapBody =
+		`${codes.length} beginbfchar\n` +
+		codes.map((c, i) => `<${c.toString(16).toUpperCase().padStart(4, '0')}> <${text.codePointAt(i).toString(16).toUpperCase().padStart(4, '0')}>`).join('\n') +
+		'\nendbfchar\n';
+	await save(
+		'type0-bfchar.pdf',
+		type0Pdf({ pages: 2, cmapBody, codeSpaces: '1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n', codes })
+	);
+}
+
+{
+	// bfrange: a contiguous run sharing an incrementing destination, plus the
+	// array form in the same CMap - the combination a careless parser loses.
+	const cmapBody =
+		'1 beginbfrange\n<0030> <0039> <0030>\nendbfrange\n' +
+		'1 beginbfrange\n<0041> <0045> [<0041> <0042> <0043> <0044> <0045>]\nendbfrange\n';
+	await save(
+		'type0-bfrange.pdf',
+		type0Pdf({
+			pages: 1,
+			cmapBody,
+			codeSpaces: '1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n',
+			codes: [0x0030, 0x0039, 0x0041, 0x0045]
+		})
+	);
+}
+
 await browser.close();
 console.log('\nDone.\n');

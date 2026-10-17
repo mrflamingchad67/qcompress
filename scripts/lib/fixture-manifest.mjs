@@ -98,6 +98,25 @@ export const FIXTURES = {
 		jpeg: 0, reencodable: 0, images: 0, pages: 1
 	},
 
+	/* Composite fonts ------------------------------------------------------- *
+	 * The corpus previously had NO fixture with a Type0 font, so the whole
+	 * Unicode layer was untestable: the text suite compares font-encoded bytes,
+	 * which for these fonts are CIDs that mean nothing without the /ToUnicode
+	 * CMap. These carry real mappings in both CMap forms.
+	 */
+	'type0-bfchar.pdf': {
+		category: 'feature',
+		notes: 'Type0 /Identity-H with a /ToUnicode CMap in bfchar form. Two pages.',
+		jpeg: 0, reencodable: 0, images: 0, pages: 2,
+		toUnicode: 1, cmapMappings: 15
+	},
+	'type0-bfrange.pdf': {
+		category: 'feature',
+		notes: 'Type0 /Identity-H whose CMap mixes scalar and array bfrange forms.',
+		jpeg: 0, reencodable: 0, images: 0, pages: 1,
+		toUnicode: 1, cmapMappings: 15
+	},
+
 	/* ── image-focused ───────────────────────────────────────────────────── */
 	'jpeg-rgb.pdf': { category: 'image', notes: 'Plain DeviceRGB DCTDecode.', jpeg: 1, reencodable: 1, images: 1, pages: 1 },
 	'jpeg-gray.pdf': { category: 'image', notes: 'DeviceGray DCTDecode - eligible, single component.', jpeg: 1, reencodable: 1, images: 1, pages: 1 },

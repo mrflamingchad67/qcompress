@@ -76,6 +76,20 @@ jobs:
       - name: Verify text-layer preservation
         run: bun run test:text-integrity
 
+      # The Unicode layer. The text suite above compares font-encoded bytes,
+      # which for a Type0 /Identity-H font are CIDs that mean nothing without
+      # the /ToUnicode CMap - so a compressor that destroyed every mapping in a
+      # document would pass everything above while leaving search, copy-paste
+      # and screen readers with nothing.
+      - name: Verify the /ToUnicode CMap parser
+        run: bun run test:cmap
+
+      - name: Verify /ToUnicode mappings survive compression
+        run: bun run test:unicode-integrity
+
+      - name: Verify extracted characters survive compression
+        run: bun run test:unicode-extraction
+
       # Proves the semantic structure comparison can actually fail. It was once dead
       # code: an early return left the whole per-page block unreachable, so
       # annotations, link targets and page geometry were never compared.

@@ -378,17 +378,49 @@ export function extractTextOps(streamText) {
 	const tokens = tokenize(streamText);
 	const ops = [];
 
+	/* The font selected by the most recent `Tf`, as a resource name.
+	 *
+	 * Needed to turn a string into characters rather than bytes. For a Type0
+	 * font with /Identity-H encoding the bytes are CIDs, and the same CID means
+	 * different characters in different fonts - so a byte-level comparison
+	 * cannot tell "He" from "XY". Recorded ADDITIVELY: `text` and the
+	 * byte-preservation guarantee are unchanged, and nothing existing compares
+	 * whole operation objects, so this cannot weaken what is already checked.
+	 *
+	 * Null means no font was selected before this operation, which is an
+	 * unknown state rather than "no text" - a conforming reader has no font to
+	 * decode with either, and reporting that as empty text would be a lie.
+	 */
+	let currentFont = null;
+
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i];
 		if (t.kind !== 'operator') continue;
 
 		switch (t.value) {
+			case 'Tf': {
+				// Operands are `fontname size`, so the name is two tokens back.
+				const name = tokens[i - 2];
+				const size = tokens[i - 1];
+				if (name?.kind === 'name') {
+					currentFont = { name: name.value, size: size?.kind === 'number' ? size.value : null };
+				} else if (name?.kind === 'number') {
+					// Malformed order, but a number where the name belongs is
+					// still a font selection attempt worth recording.
+					currentFont = { name: String(name.value), size: size?.kind === 'number' ? size.value : null };
+				}
+				break;
+			}
 			case 'Tj': {
 				const operand = tokens[i - 1];
 				// A missing or non-string operand is reported as an empty
 				// operation rather than invented: the byte payload really is
 				// empty, and the comparison will see it as such.
-				ops.push({ op: 'Tj', strings: isStringToken(operand) ? [operand.value] : [] });
+				ops.push({
+					op: 'Tj',
+					strings: isStringToken(operand) ? [operand.value] : [],
+					font: currentFont
+				});
 				break;
 			}
 			case 'TJ': {
@@ -398,19 +430,27 @@ export function extractTextOps(streamText) {
 				// carrying state across operators.
 				const open = arrayOperandIndex(tokens, i);
 				const strings = open === -1 ? [] : collectArrayStrings(tokens, open);
-				ops.push({ op: 'TJ', strings });
+				ops.push({ op: 'TJ', strings, font: currentFont });
 				break;
 			}
 			case "'": {
 				const operand = tokens[i - 1];
-				ops.push({ op: "'", strings: isStringToken(operand) ? [operand.value] : [] });
+				ops.push({
+					op: "'",
+					strings: isStringToken(operand) ? [operand.value] : [],
+					font: currentFont
+				});
 				break;
 			}
 			case '"': {
 				// Operand order is: aw ac string. The two leading numbers are
 				// spacing, not text.
 				const operand = tokens[i - 1];
-				ops.push({ op: '"', strings: isStringToken(operand) ? [operand.value] : [] });
+				ops.push({
+					op: '"',
+					strings: isStringToken(operand) ? [operand.value] : [],
+					font: currentFont
+				});
 				break;
 			}
 		}
