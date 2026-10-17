@@ -70,9 +70,10 @@ compression defect, and no amount of running the suite would have surfaced it.
 | P1 | Commit the text-layer stage | Review and commit verified work | **Done** (`d6011db`) |
 | P2 | Performance profiling | Measure before optimising | **Done** — bottleneck found and addressed |
 | P3 | `verify:file` command | One command running structural, text and visual checks | Written — **not yet run** |
-| P4 | Deploy stages 10–11 | The resize change reaches users only on deploy | **Done** — deployed manually; CI cannot publish |
-| P5 | Repository secrets | `deploy.yml` cannot deploy without them, so every push fails at publish | Not started |
-| P6 | Stale-codec hypothesis | Explain a download that differs from every fresh run | **Closed** — disproved; see P0 |
+| P4 | Deploy stages 10–11 | The resize change reaches users only on deploy | **Done** — CI deploys on push |
+| P5 | Repository secrets | `deploy.yml` cannot deploy without them, so every push fails at publish | **Done** — both configured |
+| P6 | Deployment published nothing | The site was returning 404 for every path | **Done** — see below |
+| P7 | Stale-codec hypothesis | Explain a download that differs from every fresh run | **Closed** — disproved; see P0 |
 
 ### P0 — resolved, and how
 
@@ -89,6 +90,47 @@ produced 1,534,266 B. The hypothesis was a browser tab open across a deploy,
 holding a lazily-cached codec chunk. **That hypothesis is now dead**, disproved
 by the local-vs-live comparison below: all 33 image payloads are byte-identical
 after inflate, so the two runtimes ran the same codec, not different builds.
+
+### The deployment that published nothing
+
+Worth recording in full, because the failure mode was invisible by construction.
+
+The workflow built in one job and deployed in another, shipping the site through
+`actions/upload-pages-artifact`. That artifact contains a top-level `build/`
+entry, so downloading it into `build/` produced `build/build/…`. Wrangler was
+pointed at `build/`, uploaded a single directory, and **reported success**:
+
+```
+manual deploy    Uploaded 6 files (22 already uploaded)
+CI deploy        Uploaded 1 files
+```
+
+Every deploy replaced the working site with one containing no site, and the live
+domain returned 404 for every path.
+
+What made this hard to see: the CDN kept serving cached copies of the last good
+deployment, so every remote check returned `cf-cache-status: HIT` and reported a
+healthy site. The 404s only became visible once the cache aged out, two days
+later. A long detour followed into a **non-existent** missing-`_headers`
+problem — preview branches, Cache Rules, wrangler output names, `noindex` — all
+of it inferred from cached responses of a site that was already down. The
+headers were never wrong.
+
+Two guards now exist because of this, and both assert on outcomes rather than on
+command exit codes:
+
+- **Check the build output is a complete site** — requires `build/index.html` and
+  a plausible file and asset count, before anything is published. Wrangler
+  exiting zero says nothing about whether it uploaded a site.
+- **Verify the live site serves** — fetches the production domain after
+  deploying and fails unless it returns 200.
+
+The workflow also became a single job, so `build/` is on disk where it was
+produced and there is no artifact round trip left to get wrong.
+
+The general lesson, recorded because it recurred: **when every check returns a
+cached response, the checks are measuring nothing.** Verify that the thing you
+are measuring is live before drawing conclusions from it.
 
 ### Local harness versus the live site
 
