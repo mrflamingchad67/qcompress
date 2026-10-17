@@ -78,7 +78,9 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: ${{ steps.deployment.outputs.page_url }}
+      # `pages-url`, matching the wrangler-action output. `page_url` resolved to
+      # nothing, so the environment link pointed nowhere.
+      url: ${{ steps.deployment.outputs.pages-url }}
     steps:
       # Fail before wrangler is installed, not after. Without this the run
       # spends two minutes on green checks and then dies inside wrangler's
@@ -143,8 +145,17 @@ jobs:
       # than what the deployment actually returns.
       - name: Verify the deployment responds
         env:
-          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          # wrangler-action exposes this as `pages-url`. Using `page_url` yields
+          # an empty string, which made this step fail with an opaque curl exit
+          # code 3 instead of saying so.
+          PAGE_URL: ${{ steps.deployment.outputs.pages-url }}
         run: |
+          if [ -z "$PAGE_URL" ]; then
+            echo "::error::wrangler-action reported no pages-url output."
+            echo "The upload succeeded; this check could not reach the deployment."
+            echo "Available outputs: $(echo '${{ toJSON(steps.deployment.outputs) }}')"
+            exit 1
+          fi
           echo "deployment: $PAGE_URL"
           status=$(curl -s -o /dev/null -w '%{http_code}' "$PAGE_URL/")
           echo "GET / -> $status"
