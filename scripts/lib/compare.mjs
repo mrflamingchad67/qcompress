@@ -52,30 +52,6 @@ export function compareStructure(beforeText, afterText) {
 	push('hasEncrypt', a.hasEncrypt, b.hasEncrypt);
 	push('hasNames', a.hasNames, b.hasNames);
 
-	/* Images.
-	 *
-	 * The COUNT is deliberately not compared: deduplication legitimately
-	 * removes byte-identical copies, so three identical scans become one image
-	 * object while the document still draws exactly the same pixels on all
-	 * three pages. Counting would report that correct behaviour as drift.
-	 *
-	 * What must hold is that the set of DISTINCT images is unchanged, and that
-	 * every surviving payload was already present in the input (asserted
-	 * separately, byte-for-byte, by the integrity suite).
-	 */
-	const distinct = (s) =>
-		[
-			...new Set(
-				[...s.images.values()].map(
-					(i) => `${i.width}x${i.height} ${i.colorspace} bpc=${i.bitsPerComponent} ${i.filters} smask=${i.hasSMask}`
-				)
-			)
-		].sort();
-
-	push('distinctImages', distinct(a), distinct(b));
-
-	return { diffs, before: a, after: b };
-
 	/* Per page, in display order */
 	const n = Math.max(a.pages.length, b.pages.length);
 	for (let i = 0; i < n; i++) {

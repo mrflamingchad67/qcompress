@@ -76,6 +76,12 @@ jobs:
       - name: Verify text-layer preservation
         run: bun run test:text-integrity
 
+      # Proves the semantic structure comparison can actually fail. It was once dead
+      # code: an early return left the whole per-page block unreachable, so
+      # annotations, link targets and page geometry were never compared.
+      - name: Verify the structure comparison detects damage
+        run: bun run test:structure-control
+
       # Catches the class of defect that passes every structural check:
       # deduplication blanking a page while the file stays valid.
       - name: Verify structural and semantic preservation
