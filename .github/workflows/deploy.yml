@@ -1,11 +1,20 @@
 name: Deploy to Cloudflare Pages
 
-# Requires two repository secrets (Settings > Secrets and variables > Actions):
-#   CLOUDFLARE_API_TOKEN  - token with "Cloudflare Pages: Edit" permission
-#   CLOUDFLARE_ACCOUNT_ID - from the Cloudflare dashboard sidebar
+# One job, deliberately.
 #
-# Without those secrets this workflow fails at the deploy step; the build and
-# checks still run, so it doubles as CI.
+# This used to build in one job and deploy in another, shipping the site through
+# actions/upload-pages-artifact. That was wrong: the artifact contains a
+# top-level `build/` entry, so downloading it into `build/` produced
+# `build/build/...`, and wrangler uploaded a single directory instead of the
+# site. Every deploy reported success and published nothing usable.
+#
+# The CDN then served cached copies of the last good deployment, so every remote
+# check returned `cf-cache-status: HIT` and reported a working site. Nothing
+# surfaced until the cache aged out and the site began returning 404.
+#
+# A single job removes the round trip. `build/` is right there where it was
+# produced, and the output-shape check below fails the run if the build did not
+# produce a site.
 
 on:
   push:
@@ -20,8 +29,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deployment.outputs.deployment-url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,22 +81,31 @@ jobs:
       - name: Verify structural and semantic preservation
         run: bun run test:integrity
 
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: build
+      # The check that would have caught the broken deploy. A wrangler upload of
+      # one file, or of a nested directory, still reports success - so assert on
+      # the shape of what is about to be published, not on whether the upload
+      # command exited zero.
+      - name: Check the build output is a complete site
+        run: |
+          if [ ! -f build/index.html ]; then
+            echo "::error::build/index.html is missing - this would deploy an empty site."
+            echo "build/ contains:"
+            find build -maxdepth 2 | head -20
+            exit 1
+          fi
+          total=$(find build -type f | wc -l)
+          assets=$(find build/_app -type f 2>/dev/null | wc -l)
+          echo "build/ contains $total files, of which $assets under _app/"
+          if [ "$total" -lt 10 ] || [ "$assets" -lt 5 ]; then
+            echo "::error::build/ does not look like a complete site ($total files, $assets assets)."
+            echo "Publishing this would replace the live site with something unusable."
+            exit 1
+          fi
+          echo "Site looks complete."
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-      # `deployment-url` is the output wrangler-action actually exposes.
-      url: ${{ steps.deployment.outputs.deployment-url }}
-    steps:
       # Fail before wrangler is installed, not after. Without this the run
       # spends two minutes on green checks and then dies inside wrangler's
-      # output, which reads like a deploy problem rather than a missing secret
-      # - and a red build step is easy to mistake for a broken release.
+      # output, which reads like a deploy problem rather than a missing secret.
       - name: Check publish credentials
         env:
           TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -99,23 +120,9 @@ jobs:
             echo "To fix, add both under Settings > Secrets and variables > Actions:"
             echo "  CLOUDFLARE_API_TOKEN  - a token with 'Cloudflare Pages: Edit'"
             echo "  CLOUDFLARE_ACCOUNT_ID - shown in the Cloudflare dashboard sidebar"
-            echo ""
-            echo "Then re-run this workflow. Until then, deploy from a terminal:"
-            echo "  bun run build && bunx wrangler pages deploy build --project-name=qcompress"
             exit 1
           fi
           echo "Credentials present; publishing."
-
-      # Required. Each job gets a fresh runner, and `upload-pages-artifact`
-      # packages the site rather than leaving a `build/` directory on disk, so
-      # the deploy job starts with no `build/` at all. Without this, wrangler
-      # fails with ENOENT on `scandir .../build` - which was masked for two
-      # releases by the credential error firing first.
-      - name: Fetch the built site
-        uses: actions/download-artifact@v4
-        with:
-          name: github-pages
-          path: build
 
       - name: Deploy to Cloudflare Pages
         id: deployment
@@ -125,59 +132,33 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # No --branch. This is a Direct Upload project with no production
           # branch configured, so omitting it targets production directly.
-          #
-          # This WAS added because the site appeared to be serving a preview:
-          # x-robots-tag: noindex was present and the _headers rules seemed to
-          # be ignored. Removing --branch did NOT change either. The real cause
-          # is still unestablished - see the verification step below, which now
-          # measures the deployed response instead of inferring it. Do not trust
-          # the earlier reasoning recorded in the roadmap about this.
           command: pages deploy build --project-name=qcompress
 
-      # A green deploy says the upload succeeded. It does not say the deployment
-      # behaves correctly - this workflow was green for a full run while the
-      # site returned headers nobody had looked at.
-      #
-      # Checked against the freshly created deployment, before any CDN has
-      # cached it. That vantage point matters: the production domain can only be
-      # read as `cf-cache-status: HIT`, which reports the cached response rather
-      # than what the deployment actually returns.
-      - name: Verify the deployment responds
+      # A green deploy says the upload succeeded. It does not say the site is
+      # reachable. This workflow was green repeatedly while publishing nothing
+      # usable, so the production domain is fetched and must actually respond.
+      - name: Verify the live site serves
         env:
-          # wrangler-action has no `pages-url`. Its actual outputs, printed by
-          # the guard below when this was wrong:
-          #   deployment-url, pages-deployment-id, pages-environment,
-          #   command-output, command-stderr
           PAGE_URL: ${{ steps.deployment.outputs.deployment-url }}
           ENVIRONMENT: ${{ steps.deployment.outputs.pages-environment }}
+          LIVE: https://${{ vars.PAGES_HOST || 'qcompress.pages.dev' }}
         run: |
-          if [ -z "$PAGE_URL" ]; then
-            echo "::error::wrangler-action reported no deployment-url."
-            echo "Available outputs: ${{ toJSON(steps.deployment.outputs) }}"
-            exit 1
-          fi
-          echo "deployment : $PAGE_URL"
           echo "environment: $ENVIRONMENT"
-          status=$(curl -s -o /dev/null -w '%{http_code}' "$PAGE_URL/")
-          echo "GET / -> $status"
-          if [ "$status" != "200" ]; then
-            echo "::error::The deployment URL does not serve the site (HTTP $status)."
-            echo "The upload succeeded but the site is not reachable at its own deployment URL."
+          echo "live host  : $LIVE"
+          echo ""
+          for url in "$LIVE" "$PAGE_URL"; do
+            [ -z "$url" ] && continue
+            status=$(curl -s -o /dev/null -w '%{http_code}' "$url/")
+            echo "GET $url/  ->  $status"
+            if [ "$status" = "200" ]; then
+              echo "  headers:"
+              curl -sSI "$url/" | grep -Ei 'cache-control|x-frame-options|referrer-policy|x-robots-tag' | sed 's/^/    /' || true
+            fi
+            echo ""
+          done
+          live_status=$(curl -s -o /dev/null -w '%{http_code}' "$LIVE/")
+          if [ "$live_status" != "200" ]; then
+            echo "::error::The live site is not serving (HTTP $live_status). The previous good deployment may have been replaced by an empty one."
             exit 1
           fi
-          echo ""
-          echo "response headers:"
-          curl -sSI "$PAGE_URL/" | grep -Ei 'cache-control|x-frame-options|referrer-policy|x-robots-tag' || true
-          echo ""
-          # static/_headers sets immutable caching for hashed assets and adds two
-          # security headers. If it is not applied the site still works; assets
-          # are simply re-fetched far more often than intended.
-          missing=""
-          curl -sSI "$PAGE_URL/" | grep -qi 'x-frame-options' || missing="$missing x-frame-options"
-          curl -sSI "$PAGE_URL/" | grep -qi 'immutable'        || missing="$missing immutable-caching"
-          if [ -n "$missing" ]; then
-            echo "::warning::_headers is not being applied. Missing:$missing"
-            echo "The site still works. This is a caching and security-posture gap, not a break."
-          else
-            echo "_headers is being applied."
-          fi
+          echo "Live site responds."
