@@ -78,9 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      # `pages-url`, matching the wrangler-action output. `page_url` resolved to
-      # nothing, so the environment link pointed nowhere.
-      url: ${{ steps.deployment.outputs.pages-url }}
+      # `deployment-url` is the output wrangler-action actually exposes.
+      url: ${{ steps.deployment.outputs.deployment-url }}
     steps:
       # Fail before wrangler is installed, not after. Without this the run
       # spends two minutes on green checks and then dies inside wrangler's
@@ -145,18 +144,20 @@ jobs:
       # than what the deployment actually returns.
       - name: Verify the deployment responds
         env:
-          # wrangler-action exposes this as `pages-url`. Using `page_url` yields
-          # an empty string, which made this step fail with an opaque curl exit
-          # code 3 instead of saying so.
-          PAGE_URL: ${{ steps.deployment.outputs.pages-url }}
+          # wrangler-action has no `pages-url`. Its actual outputs, printed by
+          # the guard below when this was wrong:
+          #   deployment-url, pages-deployment-id, pages-environment,
+          #   command-output, command-stderr
+          PAGE_URL: ${{ steps.deployment.outputs.deployment-url }}
+          ENVIRONMENT: ${{ steps.deployment.outputs.pages-environment }}
         run: |
           if [ -z "$PAGE_URL" ]; then
-            echo "::error::wrangler-action reported no pages-url output."
-            echo "The upload succeeded; this check could not reach the deployment."
-            echo "Available outputs: $(echo '${{ toJSON(steps.deployment.outputs) }}')"
+            echo "::error::wrangler-action reported no deployment-url."
+            echo "Available outputs: ${{ toJSON(steps.deployment.outputs) }}"
             exit 1
           fi
-          echo "deployment: $PAGE_URL"
+          echo "deployment : $PAGE_URL"
+          echo "environment: $ENVIRONMENT"
           status=$(curl -s -o /dev/null -w '%{http_code}' "$PAGE_URL/")
           echo "GET / -> $status"
           if [ "$status" != "200" ]; then
