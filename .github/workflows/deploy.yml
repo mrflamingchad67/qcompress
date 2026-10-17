@@ -96,6 +96,15 @@ jobs:
       - name: Verify the structure comparison detects damage
         run: bun run test:structure-control
 
+      # Proves the object indexer handles the body forms real documents use.
+      # It once lost 80 of 197 objects on a real 10-page file, including all 16 of
+      # its /ToUnicode maps, because it searched forward for the next `<<` past
+      # objects whose body is a bare string or array. No suite noticed: across
+      # the 40 fixtures that existed then, those forms occurred zero times, so
+      # the failing path was unreachable rather than merely untested.
+      - name: Verify the parser against real document forms
+        run: bun run test:parser-realism
+
       # Catches the class of defect that passes every structural check:
       # deduplication blanking a page while the file stays valid.
       - name: Verify structural and semantic preservation

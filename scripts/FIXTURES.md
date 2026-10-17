@@ -1,7 +1,8 @@
 # Test fixture corpus
 
-37 PDFs under `scripts/fixtures/`. All are generated locally and committed, so
-the suites run identically everywhere and never touch a network.
+45 PDFs under `scripts/fixtures/` — 42 valid and 3 deliberately invalid. All are
+generated locally and committed, so the suites run identically everywhere and
+never touch a network.
 
 Regenerate with:
 
@@ -18,8 +19,8 @@ rejected — which is the question the engine has to keep answering honestly.
 
 | Script | Needs | Produces |
 | --- | --- | --- |
-| `generate/make-fixtures.mjs` | Chromium (canvas encoders) | The 8 original savings fixtures |
-| `generate/make-integrity-fixtures.mjs` | Bun only (jSquash) | The 29 integrity fixtures |
+| `generate/make-fixtures.mjs` | Chromium (canvas encoders) | The 8 savings fixtures, plus the 3 structural-form fixtures |
+| `generate/make-integrity-fixtures.mjs` | Bun only (jSquash) | The remaining 34 |
 
 The integrity fixtures deliberately avoid Chromium so they regenerate in a
 fraction of a second with no browser involved.
@@ -74,11 +75,44 @@ identical, differ only in a JPEG comment — must **not** be merged),
 `identical-content-diff-resources` (byte-identical content streams drawing
 *different* images — the dangerous case), `mixed-aspect-images`.
 
+### Structural forms (2)
+
+Every object body the corpus contained before these two was a dictionary. Real
+documents are not like that, and the gap was not theoretical — it is why the
+object indexer could lose 80 of 197 objects on a real file while every suite
+passed.
+
+| Form | Fixture | What it holds |
+| --- | --- | --- |
+| bare string / bare array | `struct-bare-objects.pdf` | `5 0 obj (Adobe) endobj` and `8 0 obj [ -988 -486 988 808 ] endobj` — bodies with no dictionary at all |
+| indirect `/Resources`, `/Contents` array | `struct-indirect-resources.pdf` | `/Resources 7 0 R`, and `/Contents [4 0 R 5 0 R]` as two streams |
+
+`type0-compressed-cmap.pdf` sits in the feature group but belongs to the same
+story: its `/ToUnicode` map is **Flate-wrapped**, and one target is a
+**surrogate pair**. Both are spec detail a fixture can silently get wrong and
+still pass — writing the emoji as the scalar `1F600` rather than the UTF-16 code
+units `D83D DE00` decodes to a lone `U+0001` while still "succeeding".
+
 ### Deliberately invalid (3)
 
 `truncated.pdf`, `not-a-pdf.pdf`, `jpeg-corrupt.pdf`. These must produce a
 clear error or an unchanged original, **never** a claimed saving. The benchmark
 flags them as `!! INVALID` and excludes them from the totals.
+
+## Forms the corpus still does not contain
+
+Measured against the two real documents this corpus grew from, rather than
+guessed:
+
+| Form | Present in either real document |
+| --- | --- |
+| compressed object streams (`/ObjStm`) | 0 |
+| cross-reference streams (`/Type /XRef`) | 0 |
+| inline images (`BI…ID…EI`) | 0 |
+
+So there is no fixture for them, and none is claimed. They are named in README §
+"What is *not* verified" instead. QPDF handles all three when compressing; the
+exposure would be to the test-side object indexer, which reads files linearly.
 
 ## Two fixtures that earned their keep
 

@@ -21,6 +21,9 @@ been verified, not what was planned.
 | 11 | Fidelity blind spot | The fidelity suite silently skipped every resized image | Committed (`04ea5c3`) |
 | 12 | Deployment | CI could not publish; a later fix published an empty site | Committed (`f047754`) |
 | 13 | Semantic structure comparison | The per-page block of `compareStructure` was unreachable, so annotations, links and page geometry were never compared | Committed (`0779cfb`) |
+| 14 | Unicode coverage | `/ToUnicode` CMaps parsed and compared; extracted characters preserved per mode | Committed (`de6c6bf`) |
+| 15 | Object indexer completeness | Lost 80 of 197 objects on a real document, including all 16 `/ToUnicode` maps | Committed (`d8cdbfb`) |
+| 16 | Corpus realism | Every structural form that broke the parser was absent from all fixtures — unreachable, not under-tested | Committed (`parser-realism` suite) |
 
 Stages are numbered continuously in this table only. The "P" labels in sections 2
 and 3 are a separate, earlier numbering and are **not** stage numbers — `P6` in
@@ -36,19 +39,27 @@ Measured on the current working tree, Maximum mode included.
 | `check` | 0 errors, 0 warnings |
 | `test:engine` | 32 passed, 0 failed, 5 skipped |
 | `test:pipeline` | 42 passed, 0 failed |
-| `test:integrity` | 290 passed, 0 failed (37 fixtures) |
+| `test:integrity` | 320 passed, 0 failed (42 fixtures) |
+| `test:structure-control` | 12 controls behaved correctly, 0 did not |
 | `test:fidelity` | 56 passed, 0 failed, **64** raster comparisons (8 against a downscaled original) |
 | `test:fidelity-control` | 6 detected, 0 missed, 6 skipped |
 | `test:text-extract` | 47 passed, 0 failed |
-| `test:text-integrity` | 115 passed, 0 failed, 150 page comparisons |
+| `test:text-integrity` | 130 passed, 0 failed, 168 page comparisons |
+| `test:cmap` | 45 passed, 0 failed |
+| `test:parser-realism` | 53 passed, 0 failed (42 fixtures, 0 dictionary objects lost) |
+| `test:unicode-integrity` | 131 passed, 0 failed (9 CMaps, 102 mappings) |
+| `test:unicode-extraction` | 128 passed, 0 failed (12 pages, 117 characters; 156 pages not decodable, excluded and counted) |
 | `test:visual-comparator` | 32 passed, 0 failed |
-| `test:visual` | 111 passed, 0 failed, 150 page comparisons |
+| `test:visual` | 126 passed, 0 failed, 168 page comparisons |
 | `test:browser` | 72 passed, 0 failed |
 | `test:live` | 16 passed — describes the deployed build, which predates stages 10–11 |
 
 ### Bugs this work actually found
 
-Five defects, each invisible to the checks that existed at the time:
+Twelve defects, each invisible to the checks that existed at the time. Five found
+by running the engine on real documents and comparing rendered output; four by
+the text and Unicode stages; three by asking whether a passing suite could have
+passed for the wrong reason:
 
 1. `/Filter [/FlateDecode /DCTDecode]` was never decoded — stored bytes are
    Flate-wrapped JPEG, so all 33 images on a real document silently failed.
@@ -68,6 +79,54 @@ Five defects, each invisible to the checks that existed at the time:
 
 The fifth is the most instructive: it was a *verification* defect, not a
 compression defect, and no amount of running the suite would have surfaced it.
+
+6. The per-page block of `compareStructure` was unreachable behind an early
+   return, so annotations, link targets and page geometry were never compared.
+7. `parseCMap` handled `bfrange` correctly only for the array form; the scalar
+   form silently clobbered the entry before it.
+8. The code-space fingerprint omitted `codespacerange`, so two documents with an
+   identical mapping table under different code spaces compared **equal**.
+9. `extractTextOps` recorded no active font, so a page whose `/F1` switched
+   mid-stream produced one signature for two different glyph sets.
+10. `fontCMapsForPage` looked for `/Font` in the page dictionary only. Real
+    producers put `/Resources` behind a reference — one real document does this on
+    all 10 pages, so **no** CMap was found and every page decoded to nothing. Zero
+    decoded characters compare equal to zero decoded characters, so the Unicode
+    suite passed on a document where extraction was completely broken.
+11. `verify-file-unicode` paired pages by array position against a *filtered*
+    list, so it compared page 20 against page 1 and reported three pages changed
+    where nothing had.
+12. **`parseObjects` lost 80 of 197 objects on a real document.** It searched
+    forward for the next `<<` to find each object's dictionary, so any object
+    whose body is a bare string or array made it swallow everything up to the next
+    dictionary — including all 16 `/ToUnicode` maps. That document decoded **0 of
+    10** pages. Three further faults sat in the same function: braces inside string
+    literals were counted, one malformed object made it abandon the rest of the
+    file, and the `endstream` fallback took the first match — which lands inside a
+    compressed payload routinely.
+
+The last three are the pattern that matters, and they share one root cause. The
+corpus did not represent the documents:
+
+| Form | In the 40 fixtures | In that real document |
+| --- | --- | --- |
+| bare string objects | 0 | 32 |
+| bare array objects | 0 | 32 |
+| indirect `/Resources` | 0 | 10 |
+| `/Contents` as an array | 0 | 10 |
+
+Zero occurrences. Those paths were not under-tested — they were **unreachable**,
+and a user's file was the first thing to walk them. Two of the four forms came
+from a *second* real document, which is why stage 16 measures the corpus instead
+of trusting it.
+
+The same stage turned up three checks that could have passed while measuring
+nothing: a negative control built on `JSON.stringify(Map)`, which is always
+`{}`; a lone-surrogate assertion that iterated code points and so flagged
+correctly recombined pairs; and a completeness check run on QPDF-flattened text,
+where **flattening deletes bare string and array objects before the parser sees
+them** — so it passed on the very fixture built to test it. Each was caught by
+running it and asking whether it could fail.
 
 ## 2. Immediate roadmap
 
@@ -213,8 +272,9 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 | Priority | Stage | Scope | Planned result |
 | --- | --- | --- | --- |
 | P6 | PDF feature preservation | Links, bookmarks, forms, annotations, page geometry, font references, metadata, attachments | **Done** — stages 13 and 14 |
-| P7 | Encoding and Unicode coverage | `/ToUnicode` mappings, font encoding, text extraction — separate from raw-byte preservation | **Next** |
+| P7 | Encoding and Unicode coverage | `/ToUnicode` mappings, font encoding, text extraction — separate from raw-byte preservation | **Done** — `d8cdbfb` |
 | P8 | Malformed-input hardening | Truncated PDFs, invalid references, unusual streams, resource exhaustion, failure recovery | Fail safely, never return corrupted output |
+| P8b | Corpus realism | Fixtures derived from real documents, so parser paths are reachable rather than absent | **Done** — `test:parser-realism` |
 | P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | Faster without destabilising candidate selection |
 | P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | Reliable behaviour on explicitly supported browsers |
 | P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | Trustworthy UX without misleading compression claims |
