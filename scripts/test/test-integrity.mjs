@@ -215,27 +215,36 @@ for (const name of processable) {
 
 /* ── 3. Lossless preserves meaning ────────────────────────────────────────────── */
 
-setSection('[3] Lossless preserves page tree, annotations, outlines, forms and metadata');
+setSection('[3] every mode preserves page tree, annotations, outlines, forms and metadata');
 
 for (const name of processable) {
-	await test(`${name}: lossless output has the same structure as the input`, async () => {
+	await test(`${name}: output has the same structure as the input, in every mode`, async () => {
 		const bytes = await load(name);
-		const res = await optimize({ bytes, mode: 'lossless' }, runner, codec);
-
 		const beforeText = await flatten(bytes);
-		const afterText = await flatten(res.bytes);
-		assert(beforeText !== null && afterText !== null, 'could not flatten one side');
+		assert(beforeText !== null, 'could not flatten the input');
 
-		const { diffs } = compareStructure(beforeText, afterText);
+		for (const mode of ['lossless', 'balanced', 'maximum']) {
+			const res = await optimize({ bytes, mode, zip }, runner, codec);
 
-		// objectCount may legitimately move: object streams pack objects
-		// differently and QPDF may drop the free head entry. Page and feature
-		// counts must not.
-		const meaningful = diffs.filter((d) => d.field !== 'objectCount' && d.field !== 'images');
+			const afterText = await flatten(res.bytes);
+			assert(beforeText !== null && afterText !== null, `${mode}: could not flatten one side`);
 
-		// Images may differ in Lossless only if deduplication removed copies.
-		// Compare as a multiset of unique payloads rather than a count.
-		assert(meaningful.length === 0, `structural drift: ${describeDiffs(meaningful)}`);
+			/* Images are excluded for the lossy modes, and only there: re-encoding
+			 * resizes them, so the distinct-image set legitimately changes. Every
+			 * other field - page geometry, annotations, links, outlines, forms,
+			 * metadata - must be identical in every mode.
+			 *
+			 * A lossy candidate that silently dropped a link, changed a MediaBox or
+			 * lost an outline would be a document a reader would notice, and nothing
+			 * else in the suite can see it. */
+			const { diffs } = compareStructure(beforeText, afterText, { compareImages: mode === 'lossless' });
+
+			// objectCount may legitimately move: object streams pack objects
+			// differently and QPDF may drop the free head entry.
+			const meaningful = diffs.filter((d) => d.field !== 'objectCount');
+
+			assert(meaningful.length === 0, `${mode}: structural drift: ${describeDiffs(meaningful)}`);
+		}
 	});
 }
 

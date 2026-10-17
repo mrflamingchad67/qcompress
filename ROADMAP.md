@@ -17,8 +17,15 @@ been verified, not what was planned.
 | 7 | Visual-policy recalibration | Re-check lossy bounds against real user documents | Committed (`d6011db`) |
 | 8 | Output determinism | Prove or disprove reproducibility, and explain any difference | Resolved — deterministic; see below |
 | 9 | Performance profiling | Locate the bottleneck before optimising anything | Committed (`825b188`) |
-| 10 | Resize kernel | 60.8 % of an image pass was spent resizing under inherited library defaults | Measured and changed — **uncommitted** |
-| 11 | Fidelity blind spot | The fidelity suite silently skipped every resized image | Fixed — **uncommitted** |
+| 10 | Resize kernel | 60.8 % of an image pass was spent resizing under inherited library defaults | Committed (`04ea5c3`) |
+| 11 | Fidelity blind spot | The fidelity suite silently skipped every resized image | Committed (`04ea5c3`) |
+| 12 | Deployment | CI could not publish; a later fix published an empty site | Committed (`f047754`) |
+| 13 | Semantic structure comparison | The per-page block of `compareStructure` was unreachable, so annotations, links and page geometry were never compared | Committed (`0779cfb`) |
+
+Stages are numbered continuously in this table only. The "P" labels in sections 2
+and 3 are a separate, earlier numbering and are **not** stage numbers — `P6` in
+section 2 and `P6` in section 3 mean different things, which is a trap for
+anyone reading this as a single sequence.
 
 ### Verified suite results
 
@@ -205,8 +212,8 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 
 | Priority | Stage | Scope | Planned result |
 | --- | --- | --- | --- |
-| P6 | PDF feature preservation | Links, bookmarks, forms, annotations, page geometry, font references, metadata, attachments | Detect unintended loss of document functionality |
-| P7 | Encoding and Unicode coverage | `/ToUnicode` mappings, font encoding, text extraction — separate from raw-byte preservation | Stronger guarantees for searchable and extractable text |
+| P6 | PDF feature preservation | Links, bookmarks, forms, annotations, page geometry, font references, metadata, attachments | **Done** — stages 13 and 14 |
+| P7 | Encoding and Unicode coverage | `/ToUnicode` mappings, font encoding, text extraction — separate from raw-byte preservation | **Next** |
 | P8 | Malformed-input hardening | Truncated PDFs, invalid references, unusual streams, resource exhaustion, failure recovery | Fail safely, never return corrupted output |
 | P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | Faster without destabilising candidate selection |
 | P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | Reliable behaviour on explicitly supported browsers |
