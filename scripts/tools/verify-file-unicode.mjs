@@ -133,16 +133,35 @@ for (const file of files) {
 		const afterFlat = await flatten(res.bytes);
 		const after = await decodeDocument(afterFlat);
 
+		/* Pair by PAGE OBJECT NUMBER, not by position.
+		 *
+		 * `decodable` is filtered out of the full page list, so index i in it
+		 * does NOT correspond to index i in `after`. Comparing positionally
+		 * compared page 20 against page 1 and reported "CHANGED" on three pages
+		 * where nothing had changed. Object numbers are stable here because this
+		 * document is uncompressed; where they are not, the position is used and
+		 * the difference is reported rather than hidden. */
+		const byNumber = new Map(after.map((p) => [p.page, p]));
+
 		let chars = 0;
-		let diffs = [];
-		for (let i = 0; i < decodable.length; i++) {
-			const a = decodable[i];
-			const b = after[i];
-			if (a.text !== b.text) diffs.push(`page ${a.page}`);
+		const diffs = [];
+		for (const a of decodable) {
+			const b = byNumber.get(a.page);
+			if (!b) {
+				diffs.push(`page obj ${a.page} missing from the output`);
+				continue;
+			}
+			if (a.ops !== b.ops) diffs.push(`page obj ${a.page}: ${a.ops} -> ${b.ops} ops`);
+			if (a.text !== b.text) {
+				diffs.push(
+					`page obj ${a.page}: ${JSON.stringify(a.text.slice(0, 40))} -> ${JSON.stringify(b.text.slice(0, 40))}`
+				);
+			}
 			chars += a.text.length;
 		}
-		const verdict = diffs.length === 0 ? 'identical' : `CHANGED on ${diffs.slice(0, 3).join(', ')}`;
+		const verdict = diffs.length === 0 ? 'identical' : 'CHANGED';
 		log(`  ${mode.padEnd(9)} ${chars} chars across ${decodable.length} pages: ${verdict}`);
+		for (const d of diffs.slice(0, 5)) log(`             ${d}`);
 		if (diffs.length) failed++;
 	}
 }

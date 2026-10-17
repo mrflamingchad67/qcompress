@@ -106,17 +106,74 @@ export interface DocumentSummary {
 
 /* ── tokenising ───────────────────────────────────────────────────────────── */
 
-/** Index just past the `>>` closing the dict at `start`, or -1. */
+/** Index just past the `)` closing the literal string at `start`, or -1. */
+function matchStringLiteral(text: string, start: number): number {
+	let nest = 0;
+	for (let i = start; i < text.length; i++) {
+		const c = text[i];
+		if (c === '\\') {
+			i++;
+			continue;
+		}
+		if (c === '(') nest++;
+		else if (c === ')') {
+			nest--;
+			if (nest === 0) return i + 1;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Index just past the `>>` closing the dict at `start`, or -1.
+ *
+ * Skips literal strings and hex strings, because their contents are DATA and
+ * may contain `<<` or `>>`. A real 10-page document contains thousands of
+ * strings; counting a `>>` inside one as a closing brace drove the depth
+ * negative, and every object after the first such string was lost.
+ */
 function matchDict(text: string, start: number): number {
 	let depth = 0;
 	for (let i = start; i < text.length; i++) {
-		if (text[i] === '<' && text[i + 1] === '<') {
+		const c = text[i];
+
+		if (c === '(') {
+			// Literal string, with backslash escapes and balanced parentheses.
+			let p = i + 1;
+			let nest = 1;
+			while (p < text.length && nest > 0) {
+				if (text[p] === '\\') {
+					p += 2;
+					continue;
+				}
+				if (text[p] === '(') nest++;
+				else if (text[p] === ')') nest--;
+				p++;
+			}
+			i = p - 1;
+			continue;
+		}
+
+		if (c === '<' && text[i + 1] !== '<') {
+			// Hex string: runs to the next '>', which is data, not a brace.
+			const close = text.indexOf('>', i + 1);
+			if (close === -1) return -1;
+			i = close;
+			continue;
+		}
+
+		if (c === '<' && text[i + 1] === '<') {
 			depth++;
 			i++;
-		} else if (text[i] === '>' && text[i + 1] === '>') {
+			continue;
+		}
+
+		if (c === '>' && text[i + 1] === '>') {
 			depth--;
 			i++;
 			if (depth === 0) return i + 1;
+			if (depth < 0) return -1;
+			continue;
 		}
 	}
 	return -1;
@@ -381,10 +438,60 @@ export function parseObjects(text: string): Map<number, RawObject> {
 		const delimLen = m[0][0] >= '0' && m[0][0] <= '9' ? 0 : 1;
 		const headerStart = pos + m.index + delimLen;
 
-		const dictStart = text.indexOf('<<', headerStart);
-		if (dictStart === -1) break;
+		/* An object body is not always a dictionary. Real documents contain
+		 * bare string objects (`87 0 obj (Adobe) endobj`) and bare array objects
+		 * (`88 0 obj [ -988 -486 988 808 ] endobj`). Searching forward for the
+		 * next `<<` when the body is not a dictionary swallowed every object in
+		 * between - 80 of 197 in one real document, including all 16 of its
+		 * /ToUnicode maps. So the body form is inspected directly.
+		 *
+		 * Whitespace between `obj` and the body is skipped first: the header
+		 * index points at the first digit of the object NUMBER, not the body. */
+		let bodyStart = pos + m.index + m[0].length;
+		while (bodyStart < text.length && (text[bodyStart] === ' ' || text[bodyStart] === '\r' || text[bodyStart] === '\n' || text[bodyStart] === '\t')) {
+			bodyStart++;
+		}
+
+		const bodyChar = text[bodyStart];
+
+		if (bodyChar === '(') {
+			const end = matchStringLiteral(text, headerStart);
+			pos = end === -1 ? headerStart + 1 : end;
+			continue;
+		}
+
+		if (bodyChar === '[') {
+			const end = matchArray(text, bodyStart);
+			pos = end === -1 ? bodyStart + 1 : end;
+			continue;
+		}
+
+		if (text.startsWith('stream', bodyStart)) {
+			// A stream with no dictionary. Step past its payload if possible.
+			let dataStart = bodyStart + 'stream'.length;
+			if (text[dataStart] === '\r') dataStart++;
+			if (text[dataStart] === '\n') dataStart++;
+			const tail = text.indexOf('endobj', dataStart);
+			pos = tail === -1 ? dataStart : tail + 6;
+			continue;
+		}
+
+		if (text[bodyStart] !== '<' || text[bodyStart + 1] !== '<') {
+			// Anything else: not a dictionary object we can index. Step past one
+			// character and keep scanning rather than searching forward for a brace.
+			pos = bodyStart + 1;
+			continue;
+		}
+
+		const dictStart = bodyStart;
 		const dictEnd = matchDict(text, dictStart);
-		if (dictEnd === -1) break;
+		if (dictEnd === -1) {
+			// An unbalanced dictionary. Record nothing for this object and resume
+			// scanning after its header, so the objects that follow are still
+			// found. Breaking here used to hide the entire rest of the document.
+			pos = headerStart + 1;
+			continue;
+		}
 
 		objects.set(num, { num, dictStart, dictEnd, dict: text.slice(dictStart, dictEnd) });
 
@@ -409,8 +516,27 @@ export function parseObjects(text: string): Map<number, RawObject> {
 				if (after !== -1 && gap.trim().length <= 2) skip = n;
 			}
 			if (skip === -1) {
-				const after = text.indexOf('endstream', dataStart);
-				skip = after === -1 ? 0 : after - dataStart;
+				/* /Length was absent or did not validate. Searching for the FIRST
+				 * "endstream" is wrong: a stream's payload may contain those
+				 * bytes - compressed data does routinely - and landing there
+				 * left `pos` inside the payload, so every object after it was
+				 * skipped. Only accept an `endstream` actually followed by
+				 * `endobj`. */
+				let found = -1;
+				let probe = dataStart;
+				for (let attempts = 0; attempts < 64; attempts++) {
+					const at = text.indexOf('endstream', probe);
+					if (at === -1) break;
+					let after = at + 'endstream'.length;
+					if (text[after] === '\r') after++;
+					if (text[after] === '\n') after++;
+					if (text.startsWith('endobj', after)) {
+						found = at;
+						break;
+					}
+					probe = at + 1;
+				}
+				skip = found === -1 ? 0 : found - dataStart;
 			}
 			const tail = text.indexOf('endobj', dataStart + skip);
 			next = tail === -1 ? dataStart + skip : tail;

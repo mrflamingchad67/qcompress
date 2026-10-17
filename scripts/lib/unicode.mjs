@@ -115,20 +115,34 @@ export function fontCMapsForPage(flatText, page) {
 	const objects = parseObjects(flatText);
 	const out = new Map();
 
-	/* A page's /Font dictionary can be INLINE inside /Resources, or an indirect
-	 * reference. Both occur in real documents - a generator emits the inline
-	 * form, most producers emit the reference - so both are handled. Matching
-	 * only one silently yields an empty map, and an empty map decodes every page
-	 * to nothing while every comparison still passes. */
+	const pageDict = page?.dict ?? '';
+
+	/* /Resources may be inline or an indirect reference. A real 10-page
+	 * document used `/Resources 15 0 R` on every page, and reading /Font
+	 * straight out of the page dictionary found nothing - 16 populated CMaps
+	 * and not a single decodable page. Both forms are followed. */
+	let resourcesDict = null;
+
+	const resInline = /\/Resources\s*<<([\s\S]*?)>>\s*(?:\/|$)/.exec(pageDict);
+	if (resInline) resourcesDict = resInline[1];
+
+	if (!resourcesDict) {
+		const resRef = /\/Resources\s+(\d+)\s+0\s+R/.exec(pageDict);
+		if (!resRef) return out;
+		resourcesDict = objects.get(parseInt(resRef[1], 10))?.dict ?? null;
+		if (!resourcesDict) return out;
+	}
+
+	/* /Font, within those resources, may itself be inline or referenced. */
 	let fontsDict = null;
 
-	const inline = /\/Font\s*<<([^>]*)>>/.exec(page?.dict ?? '');
-	if (inline) fontsDict = inline[1];
+	const fontInline = /\/Font\s*<<([^>]*)>>/.exec(resourcesDict);
+	if (fontInline) fontsDict = fontInline[1];
 
 	if (!fontsDict) {
-		const ref = /\/Font\s+(\d+)\s+0\s+R/.exec(page?.dict ?? '');
-		if (!ref) return out;
-		fontsDict = objects.get(parseInt(ref[1], 10))?.dict ?? null;
+		const fontRef = /\/Font\s+(\d+)\s+0\s+R/.exec(resourcesDict);
+		if (!fontRef) return out;
+		fontsDict = objects.get(parseInt(fontRef[1], 10))?.dict ?? null;
 		if (!fontsDict) return out;
 	}
 
