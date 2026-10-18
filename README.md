@@ -337,7 +337,7 @@ same fixtures, and it made **5 of 8 files larger**.
 The visual suite is included in `bun run test` because its runtime is reasonable
 (roughly a minute). It needs Chromium via Playwright, which `test:browser`
 already requires.
-| `bun run test:browser` | Real Chromium: UI, privacy, lazy loading, modes, wrapped/ICC images | 72 passed |
+| `bun run test:browser` | **Chromium, Firefox and WebKit**: UI, privacy, lazy loading, modes, wrapped/ICC images | 75 per engine, 225 total |
 | `bun run test:live` | The deployed site | 16 passed |
 | `bun run bench` | The numbers above | — |
 
@@ -533,6 +533,40 @@ detecting, the rendered-page suite would go green while proving nothing.
 would have to install on every push. It runs in `bun run test` locally and is
 the gate before a release. Playwright can be provisioned with
 `bunx playwright install --with-deps chromium` if you want it in CI too.
+
+### Which browsers this is verified in
+
+`bun run test:browser` runs the whole browser suite in **Chromium, Firefox and
+WebKit**, and each engine must pass. Measured, same fixtures, byte-identical
+output in all three:
+
+| engine | version tested | result |
+| --- | --- | --- |
+| Chromium | Playwright full build | 75 passed, 0 failed |
+| Firefox | 157.0 | 75 passed, 0 failed |
+| WebKit | 27.2 (Playwright build) | 75 passed, 0 failed |
+
+That covers both WASM modules loading, the worker, `DecompressionStream`, and a
+stream that must be cancelled — the parts that decide whether a PDF can be
+compressed at all. WebKit is slower: 1.7–2.9× Chromium on identical input and
+identical output.
+
+**What this does not establish, stated plainly:**
+
+* **Playwright's WebKit is not Safari.** It is an open-source WebKit build
+  without Apple's proprietary additions. Passing there is evidence about the
+  WebKit engine, not a guarantee for Safari on macOS or iOS.
+* **No mobile browser has been tested.** No phone viewport has been exercised,
+  and this is a drag-and-drop upload interface.
+* **No minimum versions are claimed.** One build of each engine was tested, so
+  there is no floor. Playwright ships older builds, so establishing one is
+  straightforward work, not research.
+* Chromium derivatives (Edge, Brave, Opera) are untested.
+
+Where a required API is missing the app **degrades rather than breaks**:
+`makeZip()` returns `null` when `CompressionStream`/`DecompressionStream` are
+absent, and such images are skipped instead of corrupted. An old browser would
+therefore produce a *larger* file rather than an error.
 
 ### Upgrading PDF.js
 

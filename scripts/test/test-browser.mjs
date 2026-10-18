@@ -1,5 +1,11 @@
 /**
- * End-to-end verification in a real browser (Chromium).
+ * End-to-end verification in a real browser, in every engine Playwright ships.
+ *
+ * Engines: Chromium, Firefox and WebKit. The suite runs in full against each.
+ * "The app mounts" is not evidence that an engine works - all three mount, and
+ * the parts most likely to differ (two WASM modules, a worker,
+ * `DecompressionStream`, a stream that must be cancelled) are exactly the parts
+ * that decide whether a PDF can be compressed at all.
  *
  * This is the only place where the WASM engine's diagnostics capture can be
  * verified for real: in Node the glue links nodefs (so output bypasses
@@ -8,9 +14,10 @@
  * Also asserts the privacy property that matters: once the page is loaded,
  * no further network requests are made while a PDF is processed.
  *
- * Usage: bun run test:browser
+ * Usage: bun run test:browser                 every engine
+ *        bun run test:browser -- firefox      one engine
  */
-import { chromium } from 'playwright';
+import { chromium, firefox, webkit } from 'playwright';
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -56,23 +63,72 @@ function serve() {
 let passed = 0;
 let failed = 0;
 const failures = [];
+
+/** Per-engine tallies, so a failure names the engine it happened in. */
+let currentEngine = 'chromium';
+
 function check(name, condition, detail = '') {
+	const label = `${currentEngine}: ${name}`;
 	if (condition) {
 		passed++;
-		console.log(`  PASS  ${name}`);
+		console.log(`  PASS  ${label}`);
 	} else {
 		failed++;
-		failures.push(`${name}${detail ? ` :: ${detail}` : ''}`);
-		console.log(`  FAIL  ${name}${detail ? ` :: ${detail}` : ''}`);
+		failures.push(`${label}${detail ? ` :: ${detail}` : ''}`);
+		console.log(`  FAIL  ${label}${detail ? ` :: ${detail}` : ''}`);
 	}
 }
 
-const { server, port } = await serve();
-// `channel: 'chromium'` uses the full Chromium build rather than the separate
-// chromium-headless-shell download.
-const browser = await chromium.launch({ channel: 'chromium' });
+/**
+ * Select a mode and prove the selection took.
+ *
+ * The chip is a `<label>` wrapping `input[type=radio][name=mode]`, so clicking
+ * the label is the user action. But a click that silently matches nothing would
+ * leave the default mode selected, and several assertions here would then pass
+ * while measuring a different mode than they name - which is precisely the
+ * mistake that made a cross-engine probe report Balanced re-encoding images
+ * under a case labelled "lossless". So the radio is read back.
+ */
+async function setMode(page, mode) {
+	await page.click(`.chip:has-text("${mode}")`);
+	const selected = await page.evaluate(
+		() => document.querySelector('input[name="mode"]:checked')?.value ?? null
+	);
+	/* The chip's visible text is the capitalised label ("Lossless") while the
+	 * radio's value is the id ("lossless"), so the comparison is case-folded
+	 * rather than making every call site know which one it holds. The first
+	 * version compared them raw and failed on WebKit with the radio reading
+	 * exactly the string it was asked for. */
+	check(
+		`mode actually switched to ${mode}`,
+		selected !== null && selected.toLowerCase() === mode.toLowerCase(),
+		`radio reads "${selected}"`
+	);
+}
 
-console.log('\nBrowser end-to-end verification (Chromium)\n');
+const { server, port } = await serve();
+/* Engines to run. `channel: 'chromium'` uses the full Chromium build rather
+ * than the separate chromium-headless-shell download. A single engine can be
+ * selected by name, e.g. `bun run test:browser -- webkit`.
+ *
+ * The suite body below is written once and run per engine: it reads `browser`,
+ * `port`, `newPage`, `check` and the counters, all of which live in this scope. */
+const ENGINES = [
+	['chromium', chromium, { channel: 'chromium' }],
+	['firefox', firefox, {}],
+	['webkit', webkit, {}]
+];
+
+const only = process.argv.slice(2).map((a) => a.replace(/^--/, '')).filter(Boolean);
+const selected = only.length ? ENGINES.filter(([n]) => only.includes(n)) : ENGINES;
+
+if (only.length && selected.length !== only.length) {
+	console.error(`unknown engine: ${only.filter((n) => !ENGINES.some(([e]) => e === n)).join(', ')}`);
+	console.error(`available: ${ENGINES.map(([n]) => n).join(', ')}`);
+	process.exit(2);
+}
+
+async function runSuite(browser) {
 
 async function newPage() {
 	const context = await browser.newContext();
@@ -401,7 +457,7 @@ console.log('\n[9b] lossless mode never downloads the JPEG codec');
 	await selectPdf(page, textPdf(3, 10), 'lossless.pdf');
 	const baseline = requests.length;
 
-	await page.click('.chip:has-text("Lossless")');
+	await setMode(page, 'Lossless');
 	await compress(page);
 
 	const after = requests.slice(baseline);
@@ -424,7 +480,7 @@ console.log('\n[9c] the three modes are real behavioural differences');
 
 	check('mode selector offers exactly three modes', (await page.$$('.chip')).length === 3);
 
-	await page.click('.chip:has-text("Lossless")');
+	await setMode(page, 'Lossless');
 	await compress(page);
 	const lossless = await report(page);
 	const losslessSize = await processedBytes(page);
@@ -437,7 +493,7 @@ console.log('\n[9c] the three modes are real behavioural differences');
 
 	await page.click('button.secondary:has-text("Compress another")');
 	await selectPdf(page, photo, 'photo.pdf');
-	await page.click('.chip:has-text("Maximum")');
+	await setMode(page, 'Maximum');
 	await compress(page);
 	const maximum = await report(page);
 	const maximumSize = await processedBytes(page);
@@ -600,12 +656,48 @@ console.log('\n[10] icons render as inline SVG from the local bundle');
 
 	await context.close();
 }
+}
 
 // ---------------------------------------------------------------------------
-await browser.close();
-server.close();
+const perEngine = [];
+for (const [name, engine, options] of selected) {
+	currentEngine = name;
+	const before = { passed, failed };
+	console.log(`\n${'='.repeat(72)}`);
+	console.log(`Browser end-to-end verification — ${name}`);
+	console.log(`${'='.repeat(72)}\n`);
 
-console.log(`\n${passed} passed, ${failed} failed`);
+	let browser;
+	try {
+		browser = await engine.launch(options);
+	} catch (err) {
+		failed++;
+		failures.push(`${name}: engine failed to launch — ${String(err.message).split('\n')[0]}`);
+		console.log(`  FAIL  ${name}: engine failed to launch — ${String(err.message).split('\n')[0]}`);
+		continue;
+	}
+
+	try {
+		await runSuite(browser);
+	} catch (err) {
+		// One uncaught error must not abandon the remaining engines.
+		failed++;
+		failures.push(`${name}: suite aborted — ${String(err.message).split('\n')[0]}`);
+		console.log(`  FAIL  ${name}: suite aborted — ${String(err.message).split('\n')[0]}`);
+	} finally {
+		await browser.close().catch(() => {});
+	}
+
+	perEngine.push([name, passed - before.passed, failed - before.failed]);
+}
+
+console.log(`\n${'='.repeat(72)}`);
+for (const [name, p, f] of perEngine) {
+	console.log(`  ${name.padEnd(10)} ${String(p).padStart(3)} passed, ${f} failed`);
+}
+console.log(`${'='.repeat(72)}`);
+console.log(`\n${passed} passed, ${failed} failed across ${selected.length} engine(s)`);
+server.close();
 if (failures.length) {
 	console.log('\nFailures:');
 	failures.forEach((f) => console.log(`  - ${f}`));

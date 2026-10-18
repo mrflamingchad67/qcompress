@@ -24,7 +24,9 @@ been verified, not what was planned.
 | 14 | Unicode coverage | `/ToUnicode` CMaps parsed and compared; extracted characters preserved per mode | Committed (`de6c6bf`) |
 | 15 | Object indexer completeness | Lost 80 of 197 objects on a real document, including all 16 `/ToUnicode` maps | Committed (`d8cdbfb`) |
 | 16 | Corpus realism | Every structural form that broke the parser was absent from all fixtures — unreachable, not under-tested | Committed (`parser-realism` suite) |
-| 17 | Resource limits | An uncapped inflate could allocate gigabytes from a small file and take the worker down | In progress (`test:resource-limits`) |
+| 17 | Resource limits | An uncapped inflate could allocate gigabytes from a small file and take the worker down | Committed (`fc469be`) |
+| 18 | Image replacement cost | The document was rebuilt once per image; each rebuild flattened the whole string | Committed (`fdc844c`) |
+| 19 | Browser matrix | The browser suite ran in Chromium only, so two WASM modules and `DecompressionStream` were verified in one engine | Committed — 225 passed across 3 engines |
 
 Stages are numbered continuously in this table only. The "P" labels in sections 2
 and 3 are a separate, earlier numbering and are **not** stage numbers — `P6` in
@@ -53,7 +55,7 @@ Measured on the current working tree, Maximum mode included.
 | `test:unicode-extraction` | 128 passed, 0 failed (12 pages, 117 characters; 156 pages not decodable, excluded and counted) |
 | `test:visual-comparator` | 32 passed, 0 failed |
 | `test:visual` | 126 passed, 0 failed, 168 page comparisons |
-| `test:browser` | 72 passed, 0 failed |
+| `test:browser` | 225 passed, 0 failed — 75 each in Chromium, Firefox and WebKit |
 | `test:live` | 16 passed — describes the deployed build, which predates stages 10–11 |
 
 ### Bugs this work actually found
@@ -291,7 +293,7 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 | P8 | Malformed-input hardening | Truncated PDFs, invalid references, unusual streams, resource exhaustion, failure recovery | Fail safely, never return corrupted output |
 | P8b | Corpus realism | Fixtures derived from real documents, so parser paths are reachable rather than absent | **Done** — `test:parser-realism` |
 | P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | Faster without destabilising candidate selection |
-| P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | Reliable behaviour on explicitly supported browsers |
+| P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | **In progress** — 3 engines green; no version floor, no mobile, Safari unverified |
 | P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | Trustworthy UX without misleading compression claims |
 | P12 | CI and release gate | Structural, fidelity, text, browser and build checks before release | Reproducible quality checks for future changes |
 | P13 | Stable release | Document limitations, supported browsers, privacy, signature behaviour | A maintainable, well-documented public release |
