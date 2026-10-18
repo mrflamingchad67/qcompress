@@ -2,6 +2,7 @@
   "name": "qpdf-compressor",
   "private": true,
   "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "description": "Minimal local PDF compressor powered by QPDF compiled to WebAssembly.",
   "scripts": {

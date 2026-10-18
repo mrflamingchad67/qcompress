@@ -12,6 +12,9 @@ bun run build     # static production build into ./build
 bun run preview   # serve the production build
 ```
 
+MIT licensed. See [LICENSE](LICENSE), [CHANGELOG](CHANGELOG.md),
+[SECURITY](SECURITY.md) and [CONTRIBUTING](CONTRIBUTING.md).
+
 ---
 
 ## Deploying
@@ -337,7 +340,7 @@ same fixtures, and it made **5 of 8 files larger**.
 The visual suite is included in `bun run test` because its runtime is reasonable
 (roughly a minute). It needs Chromium via Playwright, which `test:browser`
 already requires.
-| `bun run test:browser` | **Chromium, Firefox and WebKit**: UI, privacy, lazy loading, modes, wrapped/ICC images | 75 per engine, 225 total |
+| `bun run test:browser` | **Chromium, Firefox and WebKit**: UI, privacy, lazy loading, modes, wrapped/ICC images, accessibility | 92 per engine, 276 total |
 | `bun run test:mobile` | **3 engines × 3 viewports**: overflow, tap targets, phone upload | 99 passed |
 | `bun run test:live` | The deployed site | 16 passed |
 | `bun run bench` | The numbers above | — |
@@ -543,14 +546,60 @@ output in all three:
 
 | engine | version tested | result |
 | --- | --- | --- |
-| Chromium | Playwright full build | 75 passed, 0 failed |
-| Firefox | 157.0 | 75 passed, 0 failed |
-| WebKit | 27.2 (Playwright build) | 75 passed, 0 failed |
+| Chromium | Playwright full build | 92 passed, 0 failed |
+| Firefox | 157.0 | 92 passed, 0 failed |
+| WebKit | 27.2 (Playwright build) | 92 passed, 0 failed |
 
 That covers both WASM modules loading, the worker, `DecompressionStream`, and a
 stream that must be cancelled — the parts that decide whether a PDF can be
 compressed at all. WebKit is slower: 1.7–2.9× Chromium on identical input and
 identical output.
+
+### Browser support policy
+
+**Safari is unverified.** Playwright's WebKit is not Safari. It shares an engine
+but not a release process, a memory model or an update cadence, and it is not a
+proxy for one. No Mac was available to test on, so this project makes no claim
+about Safari in either direction. Treat it as untested rather than as supported.
+
+The table above records the **current** Playwright build of each engine, not a
+version range. Nothing below has been tested at a pinned version.
+
+For a floor, the binding constraint is `color-mix()` in the stylesheet's derived
+tokens — not WebAssembly or the Worker API, both of which are far older:
+
+| feature | used for | lands in |
+| --- | --- | --- |
+| `color-mix()` | `--primary-soft`, `--danger-soft` | Safari 16.2 · Chrome 111 · Firefox 113 |
+| `DecompressionStream` / `CompressionStream` | Flate encode and decode | Safari 16.4 · Chrome 80 · Firefox 113 |
+| `Array.prototype.at()` | vendored QPDF glue | Safari 15.4 |
+
+So the derived floor is **Safari 16.4 · Chrome 111 · Firefox 113**. This is
+computed from feature availability and is **not measured** — the suite was never
+run on those exact versions. Read it as a reason not to assume older browsers
+work, not as a tested claim.
+
+Absent `DecompressionStream` the app does not throw. `src/lib/qpdf/zip.ts`
+checks for it and returns `null`, so compression is skipped rather than the file
+failing.
+
+### Accessibility
+
+`test:browser` asserts these in every engine, against the rendered DOM:
+
+| property | assertion |
+| --- | --- |
+| Compression progress is spoken | `role="status"`, `aria-live="polite"`, and it announces **changing** text rather than one static string |
+| Failures are spoken assertively | `role="alert"` carrying real text, not an empty shell |
+| The mode selector is a real control | `role="radiogroup"`, three named radios, exactly one checked |
+| Failure lands on the keyboard | the alert carries `tabindex="-1"` and receives focus when it appears |
+| Completion is spoken | a separate, permanently mounted live region. The progress panel lives inside `{#if busy}` and is destroyed when compression ends, so without this the whole operation finished in silence — measured at **0 announcements** |
+| The busy spinner stops moving | under `prefers-reduced-motion: reduce` nothing loops forever. It is removed, not merely slowed |
+| Errors name your file, not the engine's | the raw diagnostic is kept but QPDF's scratch name (`in_<random>_0.pdf`) is replaced with the file you chose |
+
+**What this is not.** These assertions read the accessibility tree and the live
+region's text. They are strong evidence the markup is correct, but they are not
+a substitute for a run with a real screen reader, which has not been done.
 
 ### Mobile
 

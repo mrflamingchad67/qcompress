@@ -3,5 +3,6 @@ build/
 .svelte-kit/
 .screenshots/
 .visual-diagnostics/
+.playwright-mcp/
 .DS_Store
 *.log

@@ -290,13 +290,13 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 | --- | --- | --- | --- |
 | P6 | PDF feature preservation | Links, bookmarks, forms, annotations, page geometry, font references, metadata, attachments | **Done** — stages 13 and 14 |
 | P7 | Encoding and Unicode coverage | `/ToUnicode` mappings, font encoding, text extraction — separate from raw-byte preservation | **Done** — `d8cdbfb` |
-| P8 | Malformed-input hardening | Truncated PDFs, invalid references, unusual streams, resource exhaustion, failure recovery | Fail safely, never return corrupted output |
+| P8 | Malformed-input hardening | Truncated PDFs, invalid references, unusual streams, resource exhaustion, failure recovery | **Done** — `fc469be` |
 | P8b | Corpus realism | Fixtures derived from real documents, so parser paths are reachable rather than absent | **Done** — `test:parser-realism` |
-| P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | Faster without destabilising candidate selection |
-| P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | **In progress** — 3 engines green; no version floor, no mobile, Safari unverified |
-| P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | Trustworthy UX without misleading compression claims |
+| P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | **Done** — `fdc844c`; the parser rewrite and no-recompress-flate candidates were measured and rejected |
+| P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | **In progress** — 3 engines green, phone sizes green; no version floor, Safari unverified |
+| P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | **Done** — accessibility asserted in 3 engines; no real screen-reader run yet |
 | P12 | CI and release gate | Structural, fidelity, text, browser and build checks before release | Reproducible quality checks for future changes |
-| P13 | Stable release | Document limitations, supported browsers, privacy, signature behaviour | A maintainable, well-documented public release |
+| P13 | Stable release | Document limitations, supported browsers, privacy, signature behaviour | **Done** — MIT, CHANGELOG, SECURITY, CONTRIBUTING, browser policy; Safari still unverified |
 
 ## 4. Project rules
 
