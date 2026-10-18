@@ -16,6 +16,7 @@
     "explain": "bun scripts/tools/explain.mjs",
     "profile": "bun scripts/tools/profile.mjs",
     "kernel-bench": "bun scripts/tools/kernel-bench.mjs",
+    "heap:images": "node --expose-gc --import ./scripts/tools/register-ts.mjs scripts/tools/heap-images.mjs",
     "verify:live-file": "bun scripts/tools/verify-live-file.mjs",
     "verify:file": "bun scripts/tools/verify-file.mjs",
     "test:engine": "bun scripts/test/test-compression.mjs",
@@ -28,6 +29,8 @@
     "test:text-integrity": "bun scripts/test/test-text-integrity.mjs",
     "test:cmap": "bun scripts/test/test-cmap.mjs",
     "test:parser-realism": "bun scripts/test/test-parser-realism.mjs",
+    "test:resource-limits": "bun scripts/test/test-resource-limits.mjs",
+    "test:image-replacements": "bun scripts/test/test-image-replacements.mjs",
     "test:unicode-integrity": "bun scripts/test/test-unicode-integrity.mjs",
     "test:unicode-extraction": "bun scripts/test/test-unicode-extraction.mjs",
     "test:visual-comparator": "bun scripts/test/test-visual-comparator.mjs",
@@ -36,7 +39,7 @@
     "test:browser": "bun run build && bun scripts/test/test-browser.mjs",
     "test:live": "bun scripts/test/test-live.mjs",
     "screenshots": "bun run build && bun scripts/tools/screenshots.mjs",
-    "test": "bun run check && bun run test:engine && bun run test:pipeline && bun run test:integrity && bun run test:structure-control && bun run test:fidelity && bun run test:fidelity-control && bun run test:text-extract && bun run test:text-integrity && bun run test:cmap && bun run test:parser-realism && bun run test:unicode-integrity && bun run test:unicode-extraction && bun run test:visual-comparator && bun run test:visual && bun run test:browser"
+    "test": "bun run check && bun run test:engine && bun run test:pipeline && bun run test:integrity && bun run test:structure-control && bun run test:fidelity && bun run test:fidelity-control && bun run test:text-extract && bun run test:text-integrity && bun run test:cmap && bun run test:parser-realism && bun run test:resource-limits && bun run test:image-replacements && bun run test:unicode-integrity && bun run test:unicode-extraction && bun run test:visual-comparator && bun run test:visual && bun run test:browser"
   },
   "imports": {
     "#lib/*": "./src/lib/*"

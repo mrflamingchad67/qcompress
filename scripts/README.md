@@ -59,6 +59,36 @@ Run through the package scripts; running one directly works too.
 | `test-unicode-integrity.mjs` | `bun run test:unicode-integrity` | every CMap mapping survives compression, unchanged |
 | `test-unicode-extraction.mjs` | `bun run test:unicode-extraction` | the characters a page actually renders as, per mode |
 | `test-parser-realism.mjs` | `bun run test:parser-realism` | the object indexer against the body forms real documents use |
+| `test-resource-limits.mjs` | `bun run test:resource-limits` | a decompression bomb is refused, never honoured |
+
+### Resource limits
+
+Flate expands by ~1032:1, and `makeZip().inflate` used to decompress to
+completion before any check could run — so the whole decoded payload was
+allocated first. Measured through the real pipeline, on a document QPDF accepted:
+
+```
+ 100 KB stream  ->  100 MB decoded,  +156 MB heap
+```
+
+Scaling that, a 10 MB PDF asks for roughly 10 GB. That is an allocation failure
+rather than a catchable error: in a worker it takes the tab down, and no
+candidate validation ever runs.
+
+Streams are now capped at 128 MB each — far above any legitimate image, since a
+600 DPI A4 scan is about 26 MB. Exceeding the cap **throws**, and both call sites
+already treat a failed inflate as "leave this payload exactly as it was", so the
+image is skipped rather than replaced by a truncated prefix.
+
+That distinction is what the controls are for. "It threw" is not the same claim as
+"it threw *instead of* returning a partial prefix", and a truncated JPEG is a
+corrupt file. So the suite asserts separately that nothing partial comes back, and
+that an ordinary payload — a 24 MB stream — still decodes byte-for-byte, which is
+what stops "it refused the bomb" from being trivially true.
+
+The cap lives in `src/lib/qpdf/zip.ts` rather than in the worker, because Node and
+Bun both provide `DecompressionStream`, `Blob` and `Response`. The suite
+therefore exercises the code the browser runs rather than a Node lookalike of it.
 
 ### Parser realism
 

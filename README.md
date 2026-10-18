@@ -328,6 +328,7 @@ same fixtures, and it made **5 of 8 files larger**.
 | `bun run test:text-integrity` | **168 page comparisons**, text payload per mode, through the real pipeline | 130 passed |
 | `bun run test:cmap` | `/ToUnicode` CMap parser: codespacerange, `bfchar`, both `bfrange` forms | 45 passed |
 | `bun run test:parser-realism` | Object indexer vs. the body forms real documents use. Runs on raw bytes | 53 passed |
+| `bun run test:resource-limits` | A decompression bomb is refused, never honoured | 11 passed |
 | `bun run test:unicode-integrity` | Every `/ToUnicode` mapping survives compression unchanged | 131 passed — 9 CMaps, 102 mappings |
 | `bun run test:unicode-extraction` | The characters each page renders as, per mode | 128 passed — 12 pages, 117 characters |
 | `bun run test:visual-comparator` | Visual comparator logic + negative controls. No browser | 32 passed |
@@ -472,6 +473,14 @@ Stated plainly rather than glossed over:
 * **The byte-level text payloads are compared separately**, so a change invisible
   to the CMap is caught too. Neither comparison implies the other: bytes can be
   identical while a mapping was altered, or vice versa.
+* **Resource limits are enforced per inflate, not per document.** A single
+  Flate stream may decode to at most 128 MB. Flate expands by ~1032:1, so
+  without that ceiling a 10 MB PDF could ask for ~10 GB — an allocation failure
+  rather than a catchable error, which in a worker takes the tab down instead of
+  failing a candidate. Past the ceiling the payload is **skipped, never
+  truncated**: a truncated prefix of a JPEG is a corrupt file, the one outcome
+  this project must not produce. The ceiling is far above any legitimate image
+  (a 600 DPI A4 scan is ~26 MB). See `test:resource-limits`.
 * **Font behaviour is renderer-dependent.** Both sides share one renderer and
   one font environment, so a difference means the PDF changed — but a document
   relying on a font absent from this environment renders differently on a
@@ -922,6 +931,7 @@ src/
       bytes.ts             latin1 <-> bytes (no Buffer/TextDecoder)
       options.ts           the verified option set -> qpdf argv
       protocol.ts          worker message types
+      zip.ts               bounded Flate codec (shared by the worker and its tests)
       worker.ts            engine in the worker: runner, codec, orchestration
       client.ts            worker lifecycle, original-bytes retention
     vendors/
@@ -1001,6 +1011,7 @@ valid JPEG data.
 | `bun run test:structure-control` | Proves the structure comparison can fail |
 | `bun run test:cmap` | `/ToUnicode` CMap parser |
 | `bun run test:parser-realism` | Object indexer vs. the body forms real documents use |
+| `bun run test:resource-limits` | Decompression-bomb refusal, end to end |
 | `bun run test:unicode-integrity` | Every `/ToUnicode` mapping survives compression |
 | `bun run test:unicode-extraction` | Characters a page renders as, per mode |
 | `bun run verify:file <file.pdf> [mode]` | Run a real document locally, with per-check output |

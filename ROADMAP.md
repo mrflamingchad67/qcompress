@@ -24,6 +24,7 @@ been verified, not what was planned.
 | 14 | Unicode coverage | `/ToUnicode` CMaps parsed and compared; extracted characters preserved per mode | Committed (`de6c6bf`) |
 | 15 | Object indexer completeness | Lost 80 of 197 objects on a real document, including all 16 `/ToUnicode` maps | Committed (`d8cdbfb`) |
 | 16 | Corpus realism | Every structural form that broke the parser was absent from all fixtures — unreachable, not under-tested | Committed (`parser-realism` suite) |
+| 17 | Resource limits | An uncapped inflate could allocate gigabytes from a small file and take the worker down | In progress (`test:resource-limits`) |
 
 Stages are numbered continuously in this table only. The "P" labels in sections 2
 and 3 are a separate, earlier numbering and are **not** stage numbers — `P6` in
@@ -47,6 +48,7 @@ Measured on the current working tree, Maximum mode included.
 | `test:text-integrity` | 130 passed, 0 failed, 168 page comparisons |
 | `test:cmap` | 45 passed, 0 failed |
 | `test:parser-realism` | 53 passed, 0 failed (42 fixtures, 0 dictionary objects lost) |
+| `test:resource-limits` | 11 passed, 0 failed (400 MB and 1000 MB decodes refused, heap +0 MB) |
 | `test:unicode-integrity` | 131 passed, 0 failed (9 CMaps, 102 mappings) |
 | `test:unicode-extraction` | 128 passed, 0 failed (12 pages, 117 characters; 156 pages not decodable, excluded and counted) |
 | `test:visual-comparator` | 32 passed, 0 failed |
@@ -104,6 +106,19 @@ compression defect, and no amount of running the suite would have surfaced it.
     literals were counted, one malformed object made it abandon the rest of the
     file, and the `endstream` fallback took the first match — which lands inside a
     compressed payload routinely.
+13. **An inflate with no ceiling could take the tab down.** Flate expands by
+    ~1032:1 and `makeZip().inflate` decompressed to completion before any check
+    could run, so the whole decoded payload was allocated first. Measured through
+    the real pipeline on a document QPDF accepted: a 100 KB stream decoded to
+    100 MB and added 156 MB of heap. Scaling that, a 10 MB PDF asks for ~10 GB —
+    an allocation failure, not a catchable error, so no candidate validation ever
+    ran. Now capped at 128 MB per stream and **skipped rather than truncated**:
+    a truncated JPEG prefix is a corrupt file, which is the one outcome that must
+    never be produced.
+
+Defects 12 and 13 were found by asking what happens when an input is *hostile*
+rather than merely unusual. Both had been invisible to every suite, because
+every fixture was either valid or rejected by QPDF before the tool ran.
 
 The last three are the pattern that matters, and they share one root cause. The
 corpus did not represent the documents:
