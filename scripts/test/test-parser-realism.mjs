@@ -36,7 +36,7 @@ import { parseObjects } from '../../src/lib/qpdf/structure.ts';
 import { bytesToLatin1 } from '../../src/lib/qpdf/bytes.ts';
 import { parseCMap, toUnicodeMap, fingerprint } from '../lib/cmap.mjs';
 import { fontCMapsForPage, installInflate } from '../lib/unicode.mjs';
-import { makeRunner } from '../lib/engine.mjs';
+import { makeRunner, makeZip } from '../lib/engine.mjs';
 import { FIXTURES } from '../lib/fixture-manifest.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +44,9 @@ const report = (...a) => process.stdout.write(a.join(' ') + '\n');
 
 const VERBOSE = process.argv.includes('--verbose');
 const runner = makeRunner();
-installInflate((b) => zlib.inflateSync(Buffer.from(b)));
+/* Bounded, not a raw zlib call: a /ToUnicode map is a stream like any other, and
+ * one that expands to gigabytes must fail the page rather than the machine. */
+installInflate(makeZip().inflate);
 
 const FLATTEN = ['--object-streams=disable', '--stream-data=preserve'];
 
@@ -227,7 +229,7 @@ await test('type0-compressed-cmap.pdf decodes through a Flate-wrapped map', asyn
 	const page = [...objects.entries()].find(([, o]) => /\/Type\s*\/Page[^s]/.test(o.dict ?? ''))?.[1];
 	assert(page !== undefined, 'no page object');
 
-	const cmaps = fontCMapsForPage(flat, page);
+	const cmaps = await fontCMapsForPage(flat, page);
 	assert(cmaps.size === 1, `expected 1 CMap, found ${cmaps.size} - a compressed map was skipped`);
 
 	const map = toUnicodeMap([...cmaps.values()][0]);
@@ -246,7 +248,84 @@ await test('type0-compressed-cmap.pdf decodes through a Flate-wrapped map', asyn
 	assert(loneSurrogates(decoded) === 0, `a lone surrogate survived: ${JSON.stringify(decoded)}`);
 });
 
-/* ── 4. negative controls: the suite must be able to fail ─────────────────── */
+await test('the CMap survives a codec that returns a Uint8Array', async () => {
+	/* The browser codec returns a Uint8Array, not a Buffer. `parseCMap` takes a
+	 * string, and a Uint8Array coerces to "120,98,..." rather than text - so
+	 * handing one over produced an EMPTY mapping table with no error raised, and
+	 * every page decoded to nothing. Nothing was decoded on either side of a
+	 * comparison, so the result compared equal and every suite stayed green.
+	 *
+	 * This control passes a Uint8Array deliberately, so the difference between
+	 * "decoded" and "silently empty" is asserted rather than incidental. */
+	const flat = await flatten(await load('type0-compressed-cmap.pdf'));
+	const page = [...parseObjects(flat).entries()].find(([, o]) => /\/Type\s*\/Page[^s]/.test(o.dict ?? ''))?.[1];
+	assert(page !== undefined, 'no page object');
+
+	installInflate(async (b) => new Uint8Array(zlib.inflateSync(Buffer.from(b, 'latin1'))));
+	const cmaps = await fontCMapsForPage(flat, page);
+	const map = toUnicodeMap([...cmaps.values()][0]);
+	const decoded = [...map.values()].join('');
+
+	assert(cmaps.size === 1, `expected 1 CMap, found ${cmaps.size}`);
+	assert(
+		decoded.includes('Α'),
+		`a Uint8Array from the codec decoded to nothing (${JSON.stringify(decoded)}). An empty CMap is not an error, so this would pass unnoticed.`
+	);
+});
+
+await test('CONTROL: the codec receives the stream bytes, not a UTF-8 re-encoding', async () => {
+	/* The document is carried as latin1 TEXT and reaches the codec as a string, so
+	 * the conversion happens in `installInflate`. `Buffer.from(string)` is UTF-8,
+	 * and any byte >= 0x80 is re-encoded as two bytes - destroying the Flate
+	 * stream. On `type0-compressed-cmap.pdf` that is 120 of 245 bytes: inflate
+	 * throws, the caller catches it, the page has no CMap, and the comparison
+	 * passes because nothing was decoded on either side.
+	 *
+	 * This fixture is chosen BECAUSE its compressed bytes are largely non-ASCII,
+	 * so the re-encoding is obvious. An ASCII-only CMap would pass either way. */
+	const flat = await flatten(await load('type0-compressed-cmap.pdf'));
+	const page = [...parseObjects(flat).entries()].find(([, o]) => /\/Type\s*\/Page[^s]/.test(o.dict ?? ''))?.[1];
+
+	let seen = null;
+	installInflate((bytes) => {
+		seen = Buffer.from(bytes);
+		return makeZip().inflate(bytes);
+	});
+	const cmaps = await fontCMapsForPage(flat, page);
+
+	assert(seen !== null, 'the codec was never called');
+	const highBytes = [...seen].filter((b) => b >= 0x80).length;
+	assert(
+		highBytes > 0,
+		'the fixture is supposed to carry non-ASCII compressed bytes, so this control proves nothing if it does not'
+	);
+	assert(
+		cmaps.size === 1 && toUnicodeMap([...cmaps.values()][0]).size === 4,
+		`the stream did not decode to its 4 mappings (got ${cmaps.size} CMap(s)) - a UTF-8 re-encoding of the payload would look exactly like this`
+	);
+
+	installInflate(makeZip().inflate);
+});
+
+await test('CONTROL: an unrelated codec failure is still reported, not swallowed', async () => {
+	const flat = await flatten(await load('type0-compressed-cmap.pdf'));
+	const page = [...parseObjects(flat).entries()].find(([, o]) => /\/Type\s*\/Page[^s]/.test(o.dict ?? ''))?.[1];
+
+	/* The opposite direction: a codec that fails must leave the page UNKNOWN,
+	 * not produce an empty map that then compares equal to an empty map.
+	 *
+	 * Rejects rather than throws, because that is the case a synchronous
+	 * try/catch cannot see at all - which is how the missing `await` stayed
+	 * invisible in the first place. */
+	installInflate(async () => {
+		throw new Error('injected codec failure');
+	});
+	const cmaps = await fontCMapsForPage(flat, page);
+	assert(cmaps.size === 0, `a failing codec produced ${cmaps.size} CMap(s) instead of none`);
+
+	// Restore for any later test in this file.
+	installInflate(makeZip().inflate);
+});
 
 await test('CONTROL: an index that skips a bare body is detected', async () => {
 	const flat = await flatten(await load('struct-bare-objects.pdf'));

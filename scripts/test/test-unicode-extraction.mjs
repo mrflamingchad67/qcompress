@@ -49,7 +49,7 @@ const zip = makeZip();
  * /ToUnicode streams are commonly Flate-wrapped (8 of 8 in one real document),
  * so a pass-through here would silently skip decoding on exactly the files that
  * matter most. */
-installInflate((b) => zlib.inflateSync(Buffer.from(b)));
+installInflate(makeZip().inflate);
 
 const FLATTEN = ['--object-streams=disable', '--stream-data=preserve'];
 
@@ -152,7 +152,7 @@ async function decodeDocument(flatText) {
 			continue;
 		}
 		const ops = extractTextOps(stream);
-		const cmaps = fontCMapsForPage(flatText, obj);
+		const cmaps = await fontCMapsForPage(flatText, obj);
 		out.push({ page: num, unreadable: false, ...decodePage(ops, cmaps) });
 	}
 	return out;

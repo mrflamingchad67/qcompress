@@ -23,6 +23,7 @@
  * a failure to decode is not an absence of characters.
  */
 import { parseObjects } from '../../src/lib/qpdf/structure.ts';
+import { bytesToLatin1 } from '../../src/lib/qpdf/bytes.ts';
 import { parseCMap, splitIntoCodes, utf16beToString } from './cmap.mjs';
 
 /**
@@ -36,24 +37,42 @@ import { parseCMap, splitIntoCodes, utf16beToString } from './cmap.mjs';
 let inflate = null;
 
 /**
- * @param {(bytes: Uint8Array) => Uint8Array} fn
- *   Returns the inflated BYTES. Whatever type it returns is normalised to a
- *   string here, because the harness's zlib returns a Buffer and treating that
- *   as the CMap source yields a non-string that fails every lookup - silently
- *   decoding every page to nothing.
+ * @param {(bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>} fn
+ *   Returns the inflated BYTES, synchronously or as a promise. Both are accepted
+ *   and both are normalised to latin1 text here.
+ *
+ *   The normalisation is not decoration. The codec's return type is whatever the
+ *   runtime produced: a Buffer under Node, a Uint8Array under `DecompressionStream`.
+ *   A Buffer stringifies correctly, but `Uint8Array.prototype.toString` ignores
+ *   its argument and yields "120,98,..." - so the CMap parser was handed
+ *   comma-separated byte values and produced an EMPTY mapping table with no error
+ *   raised anywhere. Every page decoded to nothing, and since nothing was decoded
+ *   on either side of a comparison, the comparison passed.
+ *
+ *   The injected function is also AWAITED. A `Promise` has a `toString`, so an
+ *   un-awaited call was stringified to the literal text "Promise { ... }", which
+ *   parses as a CMap containing nothing - the same silent emptiness by a different
+ *   route.
  */
 export function installInflate(fn) {
-	inflate = (input) => {
+	inflate = async (input) => {
 		/* Normalise BOTH directions. The document is carried as latin1 text, and
 		 * Buffer.from(string) defaults to utf8 - so passing that straight to a
 		 * zlib binding mangles every byte >= 0x80 and a valid stream fails with
 		 * "incorrect header check". The injected function is given BYTES, and
 		 * its result comes back as latin1 text. */
 		const inBytes = typeof input === 'string' ? Buffer.from(input, 'latin1') : input;
-		const out = fn(inBytes);
+
+		let out;
+		try {
+			out = await fn(inBytes);
+		} catch (err) {
+			throw new Error(err instanceof Error ? err.message : String(err));
+		}
+
 		if (typeof out === 'string') return out;
-		if (out && typeof out.toString === 'function') return out.toString('latin1');
-		throw new Error('inflate must return bytes or a latin1 string');
+		if (out instanceof Uint8Array) return bytesToLatin1(out);
+		throw new Error(`inflate must return bytes or a latin1 string, got ${typeof out}`);
 	};
 }
 
@@ -80,7 +99,7 @@ function streamOffset(flatText, o) {
 }
 
 /** Decoded body of an object, inflated when the dictionary asks for it. */
-function streamSource(flatText, objects, num) {
+async function streamSource(flatText, objects, num) {
 	const o = objects.get(num);
 	const start = streamOffset(flatText, o);
 	if (start === null) return null;
@@ -93,7 +112,12 @@ function streamSource(flatText, objects, num) {
 	if (!inflate) return null;
 
 	try {
-		return inflate(raw);
+		/* `inflate` is async and already normalises its result to latin1 text
+		 * (see `installInflate`). Both facts are load-bearing: an un-awaited call
+		 * stringified a Promise into "Promise { ... }", which parses as a CMap
+		 * holding nothing, and a synchronous try/catch could not see the rejection
+		 * at all. Either way the page silently decoded to no characters. */
+		return await inflate(raw);
 	} catch {
 		// A stream this cannot read is skipped, not guessed at. The caller sees
 		// a missing CMap and reports the page as unknown.
@@ -111,7 +135,7 @@ function streamSource(flatText, objects, num) {
  * @param {string} flatText  latin1 text of a flattened document
  * @param {{dict: string}} page
  */
-export function fontCMapsForPage(flatText, page) {
+export async function fontCMapsForPage(flatText, page) {
 	const objects = parseObjects(flatText);
 	const out = new Map();
 
@@ -156,7 +180,7 @@ export function fontCMapsForPage(flatText, page) {
 		const tu = /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(fontObj?.dict ?? '');
 		if (!tu) continue;
 
-		const source = streamSource(flatText, objects, parseInt(tu[1], 10));
+		const source = await streamSource(flatText, objects, parseInt(tu[1], 10));
 		if (source === null) continue;
 		out.set(name, parseCMap(source));
 	}

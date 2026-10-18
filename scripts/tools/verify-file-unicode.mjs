@@ -27,7 +27,9 @@ const log = (...a) => process.stdout.write(a.join(' ') + '\n');
 const runner = makeRunner();
 const codec = await makeCodec();
 const zip = makeZip();
-installInflate((b) => zlib.inflateSync(Buffer.from(b)));
+/* Bounded like the engine's own codec: a /ToUnicode stream is a stream like any
+ * other, and a map that expands to gigabytes must fail the page, not the tool. */
+installInflate(zip.inflate);
 
 const FLATTEN = ['--object-streams=disable', '--stream-data=preserve'];
 
@@ -85,7 +87,7 @@ async function decodeDocument(flat) {
 			out.push({ page: num, unreadable: true });
 			continue;
 		}
-		const cmaps = fontCMapsForPage(flat, obj);
+		const cmaps = await fontCMapsForPage(flat, obj);
 		out.push({ page: num, unreadable: false, ...decodePage(extractTextOps(stream), cmaps) });
 	}
 	return out;
