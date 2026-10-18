@@ -79,6 +79,21 @@ const COLLECT = () => {
 		};
 		return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
 	};
+	/* Flatten a translucent colour onto an opaque one.
+	 *
+	 * This step was missing, and it is what made every muted colour in this
+	 * project invisible to the audit. The dark theme is built from
+	 * `rgba(255,255,255,N)` greys, so lum() was handed the 255,255,255 channels
+	 * and scored them as if they were fully opaque - 28% white read as 21:1 when
+	 * it renders at 2.5:1. WCAG contrast is defined between the colours that are
+	 * actually painted, so the foreground has to be composited before it is
+	 * measured. Without this, no translucent colour can ever fail. */
+	const flatten = ({ r, g, b, a }, onto) => ({
+		r: r * a + onto.r * (1 - a),
+		g: g * a + onto.g * (1 - a),
+		b: b * a + onto.b * (1 - a),
+		a: 1
+	});
 	const ratio = (a, b) => {
 		const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
 		return (hi + 0.05) / (lo + 0.05);
@@ -112,11 +127,13 @@ const COLLECT = () => {
 		const fg = parse(cs.color);
 		const bg = backdrop(el);
 		if (!fg) continue;
+		/* Measure the colour that is painted, not the one that was authored. */
+		const painted = fg.a < 1 ? flatten(fg, bg) : fg;
 		const size = parseFloat(cs.fontSize);
 		const weight = parseInt(cs.fontWeight, 10) || 400;
 		const large = size >= 24 || (size >= 18.66 && weight >= 700);
 		const need = large ? 3 : 4.5;
-		const cr = ratio(fg, bg);
+		const cr = ratio(painted, bg);
 		const id = el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? `.${el.className.split(/\s+/).slice(0, 2).join('.')}` : '');
 		out.push({
 			sel: id,
@@ -140,13 +157,45 @@ const COLLECT = () => {
  * instead of against itself. #767676 is the canonical minimum-AA grey (4.54);
  * #777777 is one step darker and must fail 4.5. A probe that cannot separate
  * those two is not measuring anything.
+ *
+ * THE TRANSLUCENT CASES ARE THE IMPORTANT ONES
+ *
+ * Every fixture above is fully opaque, so a probe that ignores the alpha channel
+ * entirely would still score all of them correctly. The dark theme here is built
+ * from `rgba(255,255,255,N)` greys, so a probe that drops alpha measures 28%
+ * white as though it were 100% white and calls a 2.5:1 failure a pass. That
+ * defect is real and was live in this file: lum() destructured {r,g,b} and
+ * discarded `a`, so no translucent colour could ever fail.
+ *
+ * A probe therefore has to be able to FAIL a translucent colour before its
+ * numbers are worth anything. These two do that, with the arithmetic worked out
+ * by hand rather than read back from the probe.
  */
 const KNOWN = [
 	{ hex: '#000000', expect: 21.0, threshold: 4.5, note: 'black on white - must pass' },
 	{ hex: '#767676', expect: 4.54, threshold: 4.5, note: 'canonical minimum AA grey - must pass' },
 	{ hex: '#777777', expect: 4.48, threshold: 4.5, note: 'one step darker - must FAIL 4.5' },
 	{ hex: '#999999', expect: 2.85, threshold: 4.5, note: 'mid grey - must fail' },
-	{ hex: '#ff0000', expect: 4.0, threshold: 4.5, note: 'pure red on white - must fail 4.5' }
+	{ hex: '#ff0000', expect: 4.0, threshold: 4.5, note: 'pure red on white - must fail 4.5' },
+	// rgba(0,0,0,0.5) over white is 127.5 per channel; the browser paints 127,
+	// which is 3.98:1 and must FAIL. A probe that drops alpha scores pure black
+	// here, 21:1, PASS. The 0.02 gap from a naive "4.0" is deliberate: it is what
+	// the painted value actually is, and a fixture rounded to a tidy number would
+	// not notice a channel being truncated.
+	{
+		hex: 'rgba(0,0,0,0.5)',
+		expect: 3.98,
+		threshold: 4.5,
+		note: '50% black on white -> rgb(127,127,127), must FAIL'
+	},
+	// rgba(0,0,0,0.6) over white composites to rgb(102,102,102): 5.74:1, which
+	// must PASS. Guards against a fix that simply fails every translucent colour.
+	{
+		hex: 'rgba(0,0,0,0.6)',
+		expect: 5.74,
+		threshold: 4.5,
+		note: '60% black on white -> rgb(102,102,102), must pass'
+	}
 ];
 
 /**
@@ -238,12 +287,22 @@ async function auditError(theme) {
 
 process.stdout.write('\n');
 
+/*
+ * Counted across the loop so the process can exit non-zero.
+ *
+ * Without this the probe PRINTED the failures and still exited 0 - it was a
+ * report, not a check. Wiring it into CI in that state would have added a step
+ * that looks like a gate and gates nothing, which is the same failure as the
+ * alpha bug this PR already fixed, one level up.
+ */
+let totalFailing = 0;
+
 for (const theme of ['dark', 'light']) {
 	const rows = await audit(theme);
 	const errRows = await auditError(theme);
 	const all = [...rows, ...errRows];
 	const failing = all.filter((r) => !r.pass);
-	const errFailing = errRows.filter((r) => !r.pass);
+	totalFailing += failing.length;
 	process.stdout.write(
 		`  ${theme.toUpperCase().padEnd(6)} ${rows.length} text elements on the success path, ${errRows.length} on the error path, ${failing.length} below WCAG AA\n`
 	);
@@ -253,7 +312,6 @@ for (const theme of ['dark', 'light']) {
 		);
 	}
 	if (!failing.length) process.stdout.write('    (none)\n');
-	void errFailing;
 	process.stdout.write('\n');
 }
 
@@ -271,5 +329,12 @@ server.close();
 
 if (selfBad) {
 	process.stderr.write(`  SELF-TEST FAILED: ${selfBad} of ${KNOWN.length} known ratios not reproduced.\n`);
+	process.exit(1);
+}
+
+if (totalFailing) {
+	process.stderr.write(
+		`  CONTRAST GATE FAILED: ${totalFailing} rendered text element(s) below WCAG AA.\n`
+	);
 	process.exit(1);
 }

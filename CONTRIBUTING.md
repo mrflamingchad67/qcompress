@@ -65,11 +65,31 @@ Splice image replacements in one pass instead of per image
 Make the per-page structure comparison live, and prove it can fail
 ```
 
+## Checks on a pull request
+
+`.github/workflows/ci.yml` runs on `pull_request` as well as `push`. It is the
+gate: nothing merges on assumption.
+
+Two jobs, split by whether a browser is needed. That split was **determined, not
+assumed** — `test:fidelity` was run with `PLAYWRIGHT_BROWSERS_PATH` pointed at
+an empty directory and still passed 56, so its rasters are fixtures rather than
+live renders.
+
+| job | suites | browser |
+| --- | --- | --- |
+| `verify` | check, engine, pipeline, integrity, structure-control, fidelity, fidelity-control, text-extract, text-integrity, cmap, parser-realism, resource-limits, image-replacements, unicode-integrity, unicode-extraction, visual-comparator | none |
+| `browser` | visual, browser, mobile | Chromium / Firefox / WebKit |
+
+`test:live` is deliberately **not** in CI. It fetches the deployed site, so
+running it per pull request would mean unrelated changes probing production.
+Run it deliberately against a deployment you intend to check.
+
+`deploy.yml` still runs its own 14 checks. That is intentional: it gates its own
+publish and should stay fast. The browser-backed suites run here, against every
+proposal, rather than once per merge.
+
 ## Deploying
 
 Deploys happen automatically on push to `main` and go to Cloudflare Pages. The
 workflow verifies 14 suites, asserts the shape of the build output, and then
 fetches the live domain to confirm it responds. See `.github/workflows/deploy.yml`.
-
-There is currently **no CI check on pull requests** — changes are verified on
-merge, as part of the deploy. This is a known gap, tracked as P12 in `ROADMAP.md`.

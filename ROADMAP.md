@@ -297,6 +297,7 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 | P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | **Done** — accessibility asserted in 3 engines; no real screen-reader run yet |
 | P12 | CI and release gate | Structural, fidelity, text, browser and build checks before release | **In progress** — `ci.yml` runs on pull requests and adds the 5 suites deploy.yml never ran; unvalidated on GitHub until a PR runs it |
 | P13 | Stable release | Document limitations, supported browsers, privacy, signature behaviour | **Done** — MIT, CHANGELOG, SECURITY, CONTRIBUTING, browser policy; Safari still unverified |
+| P14 | UI redesign | Adopt the convert.to.it visual system: tokens, Tailwind layer, upload card, help dialog, options, progress, result, error | **In progress** — every section restyled from that repo's source (`src/ui/pages/Upload`, `components/StyledButton`, `Popup`, `LoadingScreen`, `Chip`, `FileInfo`); `test:browser` 276/276 and `test:mobile` 99/99 green against the new styles, `probe:contrast` 0 below AA. Two documented deviations: muted alpha and a split primary blue. Not yet reviewed on a real phone or in Safari |
 
 ## 4. Project rules
 
