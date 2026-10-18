@@ -40,7 +40,12 @@ function buildPdf(objects, header = '%PDF-1.5') {
 
 	objects.forEach((o, i) => {
 		offsets.push(pos);
-		if (o.stream === undefined) {
+		if (o.bare !== undefined) {
+			// An object whose body is NOT a dictionary: `5 0 obj (Adobe) endobj`.
+			// Real documents contain these, and a parser that assumes every body
+			// is a dictionary loses everything after the first one.
+			push(`${i + 1} 0 obj\n${o.bare}\nendobj\n`);
+		} else if (o.stream === undefined) {
 			push(`${i + 1} 0 obj\n${o.dict}\nendobj\n`);
 		} else {
 			const body = Buffer.isBuffer(o.stream) ? o.stream : enc(o.stream);
@@ -326,6 +331,221 @@ await save(
 		h: 3508
 	})
 );
+
+/* Composite fonts: Type0 with /Identity-H and a populated /ToUnicode ------
+ *
+ * The corpus had NO fixture with a composite font, so the entire Unicode layer
+ * was untestable: the text suite compares font-encoded bytes, which for a Type0
+ * font are CIDs that mean nothing without the CMap. A compressor that deleted
+ * every /ToUnicode in a document would have passed every existing suite.
+ *
+ * These carry real CID -> Unicode mappings in all three CMap forms, so the
+ * mapping can be checked for survival.
+ */
+
+/**
+ * A document using a Type0 font with /Identity-H encoding.
+ *
+ * `mappings` is a CMap body fragment; `codes` are the CIDs the content stream
+ * shows. No font program is embedded - the point is the CMap and the encoding,
+ * and qpdf does not require a FontFile to accept the document.
+ */
+function type0Pdf({ pages, cmapBody, codeSpaces, codes }) {
+	/* Object numbers are fixed BEFORE anything is built. Two earlier attempts
+	 * interleaved allocation with construction and collided: a page's
+	 * /Contents pointed at the Type0 font, so the CMap body landed in a
+	 * content-stream slot and the font referenced its own descendant. qpdf
+	 * --check accepted that file. Structural validity is not semantics. */
+	const CATALOG = 1;
+	const PAGES = 2;
+	const pageNum = Array.from({ length: pages }, (_, p) => 3 + p);
+	const contentNum = Array.from({ length: pages }, (_, p) => 3 + pages + p);
+	const FONT = 3 + 2 * pages;
+	const DESCENDANT = FONT + 1;
+	const TOUNICODE = FONT + 2;
+	const DESCRIPTOR = FONT + 3;
+
+	const objs = [];
+
+	objs[CATALOG - 1] = { dict: `<< /Type /Catalog /Pages ${PAGES} 0 R >>` };
+	objs[PAGES - 1] = {
+		dict: `<< /Type /Pages /Kids [${pageNum.map((n) => `${n} 0 R`).join(' ')}] /Count ${pages} >>`
+	};
+
+	for (let p = 0; p < pages; p++) {
+		const hex = codes
+			.map((c, i) => (c + i * 0).toString(16).padStart(4, '0').toUpperCase())
+			.join('');
+		objs[pageNum[p] - 1] = {
+			dict:
+				`<< /Type /Page /Parent ${PAGES} 0 R /MediaBox [0 0 612 792] ` +
+				`/Resources << /Font << /F1 ${FONT} 0 R >> >> /Contents ${contentNum[p]} 0 R >>`
+		};
+		objs[contentNum[p] - 1] = { dict: '<< >>', stream: `BT /F1 16 Tf 72 700 Td <${hex}> Tj ET\n` };
+	}
+
+	objs[FONT - 1] = {
+		dict:
+			`<< /Type /Font /Subtype /Type0 /BaseFont /QCFixture /Encoding /Identity-H ` +
+			`/DescendantFonts [${DESCENDANT} 0 R] /ToUnicode ${TOUNICODE} 0 R >>`
+	};
+	objs[DESCENDANT - 1] = {
+		dict:
+			`<< /Type /Font /Subtype /CIDFontType2 /BaseFont /QCFixture ` +
+			`/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> ` +
+			`/FontDescriptor ${DESCRIPTOR} 0 R /DW 600 >>`
+	};
+	objs[TOUNICODE - 1] = {
+		dict: '<< >>',
+		stream:
+			`/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n` +
+			`/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n` +
+			`/CMapName /QCFixture def\n/CMapType 2 def\n` +
+			codeSpaces +
+			cmapBody +
+			`endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n`
+	};
+	objs[DESCRIPTOR - 1] = {
+		dict:
+			'<< /Type /FontDescriptor /FontName /QCFixture /Flags 4 ' +
+			'/FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 ' +
+			'/CapHeight 700 /StemV 80 >>'
+	};
+
+	for (let i = 0; i < objs.length; i++) {
+		if (!objs[i]) throw new Error(`type0Pdf left object ${i + 1} unallocated`);
+	}
+
+	return buildPdf(objs);
+}
+
+{
+	// bfchar: one CID to one character.
+	const text = 'Hello QCompress';
+	const codes = [...text].map((_, i) => 0x0021 + i);
+	const cmapBody =
+		`${codes.length} beginbfchar\n` +
+		codes.map((c, i) => `<${c.toString(16).toUpperCase().padStart(4, '0')}> <${text.codePointAt(i).toString(16).toUpperCase().padStart(4, '0')}>`).join('\n') +
+		'\nendbfchar\n';
+	await save(
+		'type0-bfchar.pdf',
+		type0Pdf({ pages: 2, cmapBody, codeSpaces: '1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n', codes })
+	);
+}
+
+{
+	// bfrange: a contiguous run sharing an incrementing destination, plus the
+	// array form in the same CMap - the combination a careless parser loses.
+	const cmapBody =
+		'1 beginbfrange\n<0030> <0039> <0030>\nendbfrange\n' +
+		'1 beginbfrange\n<0041> <0045> [<0041> <0042> <0043> <0044> <0045>]\nendbfrange\n';
+	await save(
+		'type0-bfrange.pdf',
+		type0Pdf({
+			pages: 1,
+			cmapBody,
+			codeSpaces: '1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n',
+			codes: [0x0030, 0x0039, 0x0041, 0x0045]
+		})
+	);
+}
+
+/* Structural forms the corpus never contained --------------------------- *
+ *
+ * Measured across all 40 fixtures before this section existed: bare string
+ * objects 0, bare array objects 0, indirect /Resources 0, /Contents arrays 0.
+ * Real documents have all four. That gap is why `parseObjects` could swallow
+ * 80 of 197 objects on a real file without a single test failing - the failure
+ * mode was unreachable, not merely untested.
+ */
+
+/** A document containing bare string and bare array objects. */
+{
+	const objs = [
+		{ dict: '<< /Type /Catalog /Pages 2 0 R >>' },
+		{ dict: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>' },
+		{ dict: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 8 0 R /Contents 4 0 R >>' },
+		{ dict: '<< >>', stream: 'BT /F1 12 Tf 72 700 Td (Bare objects) Tj ET\n' },
+		// No dictionary at all: the body is the object.
+		{ bare: '(Adobe)' },
+		{ bare: '[ -988 -486 988 808 ]' },
+		{ bare: '[1 0 0 1 0 0]' },
+		{ dict: '<< /Font << /F1 9 0 R >> >>' },
+		{ dict: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>' }
+	];
+	await save('struct-bare-objects.pdf', buildPdf(objs));
+}
+
+/** A document whose /Resources is indirect and whose /Contents is an array. */
+{
+	const objs = [
+		{ dict: '<< /Type /Catalog /Pages 2 0 R >>' },
+		{ dict: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>' },
+		{ dict: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources 7 0 R /Contents [4 0 R 5 0 R] >>' },
+		{ dict: '<< >>', stream: 'BT /F1 12 Tf 72 720 Td (Indirect ) Tj ET\n' },
+		{ dict: '<< >>', stream: 'BT /F1 12 Tf 72 700 Td (resources) Tj ET\n' },
+		// Referenced by the font of both content streams.
+		{ dict: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>' },
+		{ dict: '<< /Font << /F1 6 0 R >> >>' }
+	];
+	await save('struct-indirect-resources.pdf', buildPdf(objs));
+}
+
+/* A composite font whose /ToUnicode is Flate-wrapped and whose targets need
+ * surrogate pairs. 8 of 8 CMaps in one real document are compressed, and a
+ * parser that skips compressed maps silently decodes nothing on exactly the
+ * files that matter. The emoji target is two UTF-16 code units, so a parser
+ * that forgets to recombine surrogates yields a lone half. */
+{
+	const chars = ['Α', 'Ж', '\u{1F600}', 'é'];
+	const codes = chars.map((_, i) => 0x0031 + i);
+
+	/* A CMap target is UTF-16BE CODE UNITS, not a scalar value. A character
+	 * above U+FFFF is two of them, so writing `1F600` produces a lone U+0001 and
+	 * any parser that does not recombine surrogates still "succeeds". Encoding
+	 * the pair explicitly makes the fixture able to catch that. */
+	const utf16be = (cp) => {
+		if (cp > 0xffff) {
+			const v = cp - 0x10000;
+			const hi = 0xd800 + (v >> 10);
+			const lo = 0xdc00 + (v & 0x3ff);
+			return hi.toString(16).toUpperCase().padStart(4, '0') + lo.toString(16).toUpperCase().padStart(4, '0');
+		}
+		return cp.toString(16).toUpperCase().padStart(4, '0');
+	};
+
+	const cmapBody =
+		`${codes.length} beginbfchar\n` +
+		codes.map((c, i) => `<${c.toString(16).toUpperCase().padStart(4, '0')}> <${utf16be(chars[i].codePointAt(0))}>`).join('\n') +
+		'\nendbfchar\n';
+
+	const CMAP = 7;
+	const objs = [
+		{ dict: '<< /Type /Catalog /Pages 2 0 R >>' },
+		{ dict: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>' },
+		{ dict: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>' },
+		{ dict: '<< >>', stream: `BT /F1 14 Tf 72 700 Td <${codes.map((c) => c.toString(16).toUpperCase().padStart(4, '0')).join('')}> Tj ET\n` },
+		{ dict: `<< /Type /Font /Subtype /Type0 /BaseFont /QCUnicode /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode ${CMAP} 0 R >>` },
+		{ dict: '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /QCUnicode /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R /DW 600 >>' },
+		{
+			dict: '<< /Filter /FlateDecode >>',
+			stream: zlib.deflateSync(
+				Buffer.from(
+					`/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n` +
+						`/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n` +
+						`/CMapName /QCUnicode def\n/CMapType 2 def\n` +
+						`1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n` +
+						cmapBody +
+						`endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n`,
+					'latin1'
+				),
+				{ level: 9 }
+			)
+		},
+		{ dict: '<< /Type /FontDescriptor /FontName /QCUnicode /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 /CapHeight 700 /StemV 80 >>' }
+	];
+	await save('type0-compressed-cmap.pdf', buildPdf(objs));
+}
 
 await browser.close();
 console.log('\nDone.\n');

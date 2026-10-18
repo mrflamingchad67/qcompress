@@ -69,6 +69,41 @@
 
 	/** True when the file cannot be shrunk and was returned untouched. */
 	const noGain = $derived(!!result?.fallback);
+
+	let errorEl: HTMLDivElement | undefined = $state();
+
+	/**
+	 * What completion says out loud.
+	 *
+	 * The progress panel is a live region, but it sits inside `{#if busy}`, so
+	 * the moment compression ends the region is destroyed - taking with it the
+	 * text a screen reader was part-way through. Nothing else was speaking, so
+	 * the whole operation ended silently: nothing ever said the work was
+	 * finished. The browser suite proved it, 0 announcements across a complete
+	 * run. This is a separate, permanently mounted region so that finishing is
+	 * itself an event.
+	 */
+	const announcement = $derived.by(() => {
+		if (phase !== 'done') return '';
+		const name = downloadName;
+		const size = formatBytes(outSize);
+		if (reduced) return `Done. ${name}, ${size}, ${formatPercent((saved / inSize) * 100)} smaller than the original.`;
+		if (unchanged) return `Done. ${name}, ${size}. No size reduction was achieved.`;
+		return `Done. ${name}, ${size}, ${formatPercent(((outSize - inSize) / inSize) * 100)} larger than the original.`;
+	});
+
+	/**
+	 * Land the keyboard on the failure.
+	 *
+	 * `role="alert"` makes a screen reader speak the error, but it does nothing
+	 * for a sighted keyboard user: focus stayed wherever it was, which the
+	 * suite measured as `activeElement BODY` - the document, not the message.
+	 * The alert is given `tabindex="-1"` so it can receive focus without
+	 * joining the Tab order, and is focused once as it appears.
+	 */
+	$effect(() => {
+		if (error && errorEl) errorEl.focus();
+	});
 	const lossy = $derived(!!result?.lossy);
 
 	const statusLine = $derived(
@@ -107,6 +142,33 @@
 		return null;
 	}
 
+	/**
+	 * What to show when QPDF could not open the file.
+	 *
+	 * The engine's own words are worth keeping - they say WHY, which a generic
+	 * apology does not - but they were shown raw and alone, and qpdf reports them
+	 * against its own scratch name. A real user saw:
+	 *
+	 *     WARNING: in_mvdnjgjz_0.pdf: can't find PDF header
+	 *
+	 * `in_mvdnjgjz_0.pdf` is a file inside the WASM filesystem that the user has
+	 * never heard of, presented as though it were theirs. So: lead with a plain
+	 * sentence, then give the reason, with the scratch name replaced by the name
+	 * of the file actually chosen.
+	 *
+	 * Both halves are deliberate. Dropping the diagnostic would hide the most
+	 * useful thing the engine says; showing it unedited points at the wrong file.
+	 */
+	function describeUnreadable(detail: string | null | undefined, realName: string): string {
+		const lead = 'This file could not be opened. It may be damaged, or use a format QPDF cannot read.';
+		if (!detail) return lead;
+
+		// qpdf's scratch names are `in_<random>_0.pdf`; \w covers the underscore,
+		// which [a-z0-9] does not. Anything not matched is left alone.
+		const reason = String(detail).replace(/\bin_\w+\.pdf\b/gi, realName).trim();
+		return reason ? `${lead} The engine said: ${reason}` : lead;
+	}
+
 	async function acceptFile(f: File) {
 		error = null;
 		const problem = validate(f);
@@ -124,9 +186,7 @@
 			const result = await engine.inspect(f, (s) => (stage = s));
 			info = result;
 			if (!result.readable && !result.needsPassword) {
-				error =
-					result.detail ??
-					'QPDF could not open this file. It may be damaged or use an unsupported format.';
+				error = describeUnreadable(result.detail, f.name);
 			}
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
@@ -356,8 +416,12 @@
 		</div>
 	{/if}
 
+	<!-- Stays mounted across every phase, so that finishing is announced rather
+	     than being swallowed by the teardown of the region above. -->
+	<p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+
 	{#if error}
-		<div class="error" role="alert">
+		<div class="error" role="alert" tabindex="-1" bind:this={errorEl}>
 			<p>
 				<CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
 				<span>{error}</span>
@@ -633,6 +697,12 @@
 		gap: 0.4375rem;
 		align-self: center;
 		min-width: 15rem;
+		/* WCAG 2.5.5 target size (enhanced). The padding alone produced a 39 px
+		 * button at every viewport and in all three engines, so the primary
+		 * action on a touch device sat below the recommended minimum. Expressed
+		 * as min-height rather than more padding so it holds regardless of the
+		 * user's font size. */
+		min-height: 44px;
 		margin: 0.25rem auto 0;
 		padding: 0.5rem 1.25rem;
 		background: var(--primary);
@@ -657,6 +727,8 @@
 		align-items: center;
 		justify-content: center;
 		gap: 0.375rem;
+		/* Same reasoning as .primary: this is a touch target too. */
+		min-height: 44px;
 		padding: 0.5rem 0.75rem;
 		background: var(--bg-card);
 		border: 1px solid var(--border-strong);
@@ -715,6 +787,10 @@
 		display: flex;
 		align-items: center;
 		gap: 0.3125rem;
+		/* Measured at 30 px tall at every viewport in all three engines, which is
+		 * the smallest target on the page and sits directly under the 24 px AA
+		 * floor's comfortable margin. Same reasoning as .primary. */
+		min-height: 44px;
 		padding: 0.25rem 0.5625rem;
 		background: var(--bg-card);
 		border: 1px solid var(--border-strong);
@@ -852,8 +928,13 @@
 			opacity: 0.5;
 		}
 
+		/* The spinner used to be slowed to 2.4s here, which is still an
+		 * infinitely looping rotation - the exact thing the preference asks to
+		 * be spared. It is removed instead; the button's own label and the
+		 * full-width dimmed bar carry "still working" without any motion. */
 		.primary.busy :global(svg) {
-			animation-duration: 2.4s;
+			animation: none;
+			opacity: 0.55;
 		}
 	}
 

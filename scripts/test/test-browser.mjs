@@ -1,5 +1,11 @@
 /**
- * End-to-end verification in a real browser (Chromium).
+ * End-to-end verification in a real browser, in every engine Playwright ships.
+ *
+ * Engines: Chromium, Firefox and WebKit. The suite runs in full against each.
+ * "The app mounts" is not evidence that an engine works - all three mount, and
+ * the parts most likely to differ (two WASM modules, a worker,
+ * `DecompressionStream`, a stream that must be cancelled) are exactly the parts
+ * that decide whether a PDF can be compressed at all.
  *
  * This is the only place where the WASM engine's diagnostics capture can be
  * verified for real: in Node the glue links nodefs (so output bypasses
@@ -8,9 +14,10 @@
  * Also asserts the privacy property that matters: once the page is loaded,
  * no further network requests are made while a PDF is processed.
  *
- * Usage: bun run test:browser
+ * Usage: bun run test:browser                 every engine
+ *        bun run test:browser -- firefox      one engine
  */
-import { chromium } from 'playwright';
+import { chromium, firefox, webkit } from 'playwright';
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -56,23 +63,72 @@ function serve() {
 let passed = 0;
 let failed = 0;
 const failures = [];
+
+/** Per-engine tallies, so a failure names the engine it happened in. */
+let currentEngine = 'chromium';
+
 function check(name, condition, detail = '') {
+	const label = `${currentEngine}: ${name}`;
 	if (condition) {
 		passed++;
-		console.log(`  PASS  ${name}`);
+		console.log(`  PASS  ${label}`);
 	} else {
 		failed++;
-		failures.push(`${name}${detail ? ` :: ${detail}` : ''}`);
-		console.log(`  FAIL  ${name}${detail ? ` :: ${detail}` : ''}`);
+		failures.push(`${label}${detail ? ` :: ${detail}` : ''}`);
+		console.log(`  FAIL  ${label}${detail ? ` :: ${detail}` : ''}`);
 	}
 }
 
-const { server, port } = await serve();
-// `channel: 'chromium'` uses the full Chromium build rather than the separate
-// chromium-headless-shell download.
-const browser = await chromium.launch({ channel: 'chromium' });
+/**
+ * Select a mode and prove the selection took.
+ *
+ * The chip is a `<label>` wrapping `input[type=radio][name=mode]`, so clicking
+ * the label is the user action. But a click that silently matches nothing would
+ * leave the default mode selected, and several assertions here would then pass
+ * while measuring a different mode than they name - which is precisely the
+ * mistake that made a cross-engine probe report Balanced re-encoding images
+ * under a case labelled "lossless". So the radio is read back.
+ */
+async function setMode(page, mode) {
+	await page.click(`.chip:has-text("${mode}")`);
+	const selected = await page.evaluate(
+		() => document.querySelector('input[name="mode"]:checked')?.value ?? null
+	);
+	/* The chip's visible text is the capitalised label ("Lossless") while the
+	 * radio's value is the id ("lossless"), so the comparison is case-folded
+	 * rather than making every call site know which one it holds. The first
+	 * version compared them raw and failed on WebKit with the radio reading
+	 * exactly the string it was asked for. */
+	check(
+		`mode actually switched to ${mode}`,
+		selected !== null && selected.toLowerCase() === mode.toLowerCase(),
+		`radio reads "${selected}"`
+	);
+}
 
-console.log('\nBrowser end-to-end verification (Chromium)\n');
+const { server, port } = await serve();
+/* Engines to run. `channel: 'chromium'` uses the full Chromium build rather
+ * than the separate chromium-headless-shell download. A single engine can be
+ * selected by name, e.g. `bun run test:browser -- webkit`.
+ *
+ * The suite body below is written once and run per engine: it reads `browser`,
+ * `port`, `newPage`, `check` and the counters, all of which live in this scope. */
+const ENGINES = [
+	['chromium', chromium, { channel: 'chromium' }],
+	['firefox', firefox, {}],
+	['webkit', webkit, {}]
+];
+
+const only = process.argv.slice(2).map((a) => a.replace(/^--/, '')).filter(Boolean);
+const selected = only.length ? ENGINES.filter(([n]) => only.includes(n)) : ENGINES;
+
+if (only.length && selected.length !== only.length) {
+	console.error(`unknown engine: ${only.filter((n) => !ENGINES.some(([e]) => e === n)).join(', ')}`);
+	console.error(`available: ${ENGINES.map(([n]) => n).join(', ')}`);
+	process.exit(2);
+}
+
+async function runSuite(browser) {
 
 async function newPage() {
 	const context = await browser.newContext();
@@ -263,9 +319,50 @@ console.log('\n[4] non-PDF input is rejected without breaking the page');
 	});
 	await page.waitForSelector('.error', { timeout: 30_000 });
 	const text = (await page.textContent('.error')) ?? '';
+	/* NOTE: this file is named .txt and typed text/plain, so
+	 * +page.svelte rejects it on the filename before QPDF is ever called. The
+	 * engine path is [4b]. */
 	check('shows an error', /not a PDF/i.test(text), text.slice(0, 160));
 	check('offers retry / another file', await page.isVisible('.error-actions'));
 	check('page still usable', await page.isVisible('.drop'));
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[4b] a file NAMED .pdf that QPDF cannot open');
+{
+	/* The case [4] does not reach. A damaged or mislabelled file passes the
+	 * filename guard, goes to the engine, and comes back with a qpdf diagnostic.
+	 *
+	 * This is the path every user with a damaged PDF takes, and until this test
+	 * existed it was unverified - [4] passed against a filename check while
+	 * claiming to cover non-PDF input.
+	 *
+	 * The assertion that matters most is the last one. The engine's own words are
+	 * worth showing - they say WHY the file was refused - but qpdf reports them
+	 * against its own scratch filename (`in_mvdmx24o_0.pdf`), which is a file
+	 * inside WASM that the user has never seen. */
+	const { page, context } = await newPage();
+	await page.setInputFiles('input[type=file]', {
+		name: 'damaged.pdf',
+		mimeType: 'application/pdf',
+		buffer: Buffer.from(notAPdf())
+	});
+	await page.waitForSelector('.error, .result', { timeout: 60_000 });
+	const text = (await page.textContent('.error')) ?? '';
+
+	check('an unreadable .pdf is refused', text.trim().length > 0, text.slice(0, 160));
+	check(
+		'the message explains it in plain language',
+		/(could not|did not|cannot|unable|damaged|unsupported|not a (valid )?pdf)/i.test(text),
+		text.slice(0, 160)
+	);
+	check(
+		"the message does not expose QPDF's internal scratch filename",
+		!/\bin_\w+\.pdf\b/i.test(text),
+		`leaked: ${/\bin_\w+\.pdf\b/i.exec(text)?.[0]}`
+	);
+	check('offers retry / another file', await page.isVisible('.error-actions'));
 	await context.close();
 }
 
@@ -401,7 +498,7 @@ console.log('\n[9b] lossless mode never downloads the JPEG codec');
 	await selectPdf(page, textPdf(3, 10), 'lossless.pdf');
 	const baseline = requests.length;
 
-	await page.click('.chip:has-text("Lossless")');
+	await setMode(page, 'Lossless');
 	await compress(page);
 
 	const after = requests.slice(baseline);
@@ -424,7 +521,7 @@ console.log('\n[9c] the three modes are real behavioural differences');
 
 	check('mode selector offers exactly three modes', (await page.$$('.chip')).length === 3);
 
-	await page.click('.chip:has-text("Lossless")');
+	await setMode(page, 'Lossless');
 	await compress(page);
 	const lossless = await report(page);
 	const losslessSize = await processedBytes(page);
@@ -437,7 +534,7 @@ console.log('\n[9c] the three modes are real behavioural differences');
 
 	await page.click('button.secondary:has-text("Compress another")');
 	await selectPdf(page, photo, 'photo.pdf');
-	await page.click('.chip:has-text("Maximum")');
+	await setMode(page, 'Maximum');
 	await compress(page);
 	const maximum = await report(page);
 	const maximumSize = await processedBytes(page);
@@ -568,6 +665,254 @@ console.log('\n[9f] repeated runs do not leak state between files');
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n[11] what a screen reader is actually told');
+{
+	/* The interface already carries role="status" aria-live="polite" on the
+	 * progress panel and role="alert" on errors. Neither was asserted anywhere.
+	 *
+	 * An attribute is not a behaviour: a live region whose text never changes
+	 * announces nothing, and an alert that is present but empty announces
+	 * nothing. Both would pass a check that only read the markup - which is the
+	 * shape of defect this project has hit repeatedly.
+	 *
+	 * The attributes have to be read WHILE BUSY. The markup is
+	 * `{#if busy}<div class="progress" ...>`, so once the run ends the element is
+	 * gone and reading it afterwards returns null. An earlier probe did exactly
+	 * that and reported role=undefined for every engine, which reads exactly like
+	 * a missing live region and is not one. */
+	const { page, context } = await newPage();
+
+	const liveRegion = () =>
+		page.evaluate(() => {
+			const el = document.querySelector('.progress');
+			if (!el) return null;
+			return {
+				role: el.getAttribute('role'),
+				ariaLive: el.getAttribute('aria-live'),
+				text: (el.innerText ?? '').replace(/\s+/g, ' ').trim()
+			};
+		});
+
+	/* A real JPEG, not a synthetic text PDF. A text-only document finishes in
+	 * single-digit milliseconds, so the progress panel legitimately reports only
+	 * one stage, and a "the text changes" assertion would then be measuring the
+	 * document rather than the interface. The first version used textPdf and
+	 * failed for exactly that reason. */
+	const photo = new Uint8Array(await readFile(path.join(here, '..', 'fixtures', 'photo-q90.pdf')));
+	await selectPdf(page, photo, 'announced.pdf');
+
+	// Read the semantics while the options panel is still open.
+	const group = await page.evaluate(() => {
+		const g = document.querySelector('[role="radiogroup"]');
+		if (!g) return null;
+		const radios = [...g.querySelectorAll('input[type=radio]')];
+		return {
+			label: g.getAttribute('aria-label'),
+			count: radios.length,
+			checked: radios.filter((r) => r.checked).length,
+			allNamed: radios.every((r) => (r.closest('label')?.textContent ?? '').trim().length > 0)
+		};
+	});
+
+	check('the mode selector is a labelled radiogroup', group !== null && !!group.label, String(group?.label));
+	check('it offers three radios with exactly one checked', group?.count === 3 && group?.checked === 1, `${group?.count} radios, ${group?.checked} checked`);
+	check('every radio has a visible label', group?.allNamed === true);
+
+	// Sample the progress region for the whole run, so a static region is visible
+	// as one distinct announcement rather than many.
+	const announced = new Set();
+	let attrs = null;
+	const sampling = (async () => {
+		for (let i = 0; i < 400; i++) {
+			const live = await liveRegion().catch(() => null);
+			if (live && live.text) {
+				announced.add(live.text);
+				if (!attrs) attrs = live;
+			}
+			if (i % 10 === 0) await page.waitForTimeout(10);
+		}
+	})();
+
+	await compress(page);
+	await sampling;
+
+	check('the progress panel is a polite live region', attrs?.role === 'status' && attrs?.ariaLive === 'polite', `role=${attrs?.role} aria-live=${attrs?.ariaLive}`);
+	check(
+		'it announces CHANGING text, not a static string',
+		announced.size >= 2,
+		`${announced.size} distinct announcement(s): ${[...announced].join(' | ')}`
+	);
+
+	// The error panel is populated on a separate page, so the result is not in play.
+	const page2 = await context.newPage();
+	await page2.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+	await page2.waitForSelector('.drop-title', { timeout: 30_000 });
+	await page2.setInputFiles('input[type=file]', {
+		name: 'broken.pdf',
+		mimeType: 'application/pdf',
+		buffer: Buffer.from(notAPdf())
+	});
+	await page2.waitForSelector('.error', { timeout: 60_000 });
+	const alert = await page2.evaluate(() => {
+		const el = document.querySelector('.error');
+		return { role: el?.getAttribute('role'), text: (el?.innerText ?? '').trim() };
+	});
+	check('errors are announced assertively', alert.role === 'alert', `role=${alert.role}`);
+	check('the error alert carries real text', alert.text.length > 10, alert.text.slice(0, 80));
+
+	// The loss warning is P11's "clear loss warnings" item.
+	const hint = await page.evaluate(() => document.querySelector('.hint')?.textContent?.trim() ?? null);
+	check('the result panel warns that signatures are invalidated', /signature/i.test(hint ?? ''), String(hint).slice(0, 80));
+
+	await context.close();
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[12] the motion preference, and where focus goes after a state change');
+{
+	/* --- reduced motion ------------------------------------------------- */
+	/* Asserted rather than assumed. The stylesheet already honours
+	 * `prefers-reduced-motion` for the progress bar, but the busy button's
+	 * spinner was only slowed to 2.4s, which is still an infinitely looping
+	 * rotation - the exact thing the preference asks to be spared. The test
+	 * states the property directly: under `reduce`, nothing may loop forever.
+	 */
+	const rmContext = await browser.newContext({ reducedMotion: 'reduce' });
+	const rmPage = await rmContext.newPage();
+	await rmPage.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+	await rmPage.waitForSelector('.drop-title', { timeout: 30_000 });
+
+	/** Read the animation state of the two moving parts while compression runs. */
+	const measureMotion = async (page) => {
+		await page.setInputFiles('input[type=file]', {
+			name: 'sample.pdf',
+			mimeType: 'application/pdf',
+			buffer: Buffer.from(minimalPdf())
+		});
+		await page.waitForSelector('button.primary:has-text("Compress PDF")', { timeout: 120_000 });
+		await page.click('button.primary:has-text("Compress PDF")');
+		await page.waitForSelector('.progress', { timeout: 60_000 });
+		return page.evaluate(() => {
+			const read = (sel) => {
+				const el = document.querySelector(sel);
+				if (!el) return null;
+				const cs = getComputedStyle(el);
+				return { name: cs.animationName, duration: cs.animationDuration, iterations: cs.animationIterationCount };
+			};
+			return { bar: read('.bar span'), spinner: read('.primary.busy svg, .primary.busy .spin') };
+		});
+	};
+
+	const reduced = await measureMotion(rmPage);
+	await rmContext.close();
+
+	const still = (m) => Boolean(m) && m.name !== 'none' && m.iterations === 'infinite';
+	check(
+		'the progress bar does not loop under prefers-reduced-motion',
+		!still(reduced.bar),
+		JSON.stringify(reduced.bar)
+	);
+	check(
+		'the busy spinner does not loop under prefers-reduced-motion',
+		!still(reduced.spinner),
+		JSON.stringify(reduced.spinner)
+	);
+
+	/* --- focus after a failure ------------------------------------------ */
+	/* `role="alert"` announces, but an element that cannot take focus cannot be
+	 * landed on by a keyboard user who has just triggered an error, and the next
+	 * Tab will not reach it either unless it is in the order.
+	 */
+	const fc = await browser.newContext();
+	const fp = await fc.newPage();
+	await fp.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+	await fp.waitForSelector('.drop-title', { timeout: 30_000 });
+	await fp.setInputFiles('input[type=file]', {
+		name: 'broken.pdf',
+		mimeType: 'application/pdf',
+		buffer: Buffer.from(notAPdf())
+	});
+	await fp.waitForSelector('.error', { timeout: 60_000 });
+
+	const alertEl = await fp.evaluate(() => {
+		const el = document.querySelector('.error');
+		if (!el) return null;
+		return { hasTabindex: el.hasAttribute('tabindex'), tabindex: el.getAttribute('tabindex'), role: el.getAttribute('role') };
+	});
+	check('the error alert is reachable by keyboard', alertEl?.hasTabindex === true, JSON.stringify(alertEl));
+
+	const focused = await fp.evaluate(() => {
+		const a = document.activeElement;
+		return { tag: a?.tagName ?? null, cls: typeof a?.className === 'string' ? a.className : '', inError: !!a?.closest?.('.error') };
+	});
+	check(
+		'focus moves to the error when one appears',
+		focused.inError === true,
+		`activeElement ${focused.tag}.${focused.cls}`
+	);
+	await fc.close();
+
+	/* --- the result is announced at all --------------------------------- */
+	/* The progress region lives inside `{#if busy}`, so it is removed the
+	 * moment compression ends. If nothing else is a live region then completion
+	 * is silent: the text a screen reader was reading is destroyed before it can
+	 * report that the work finished.
+	 */
+	const cc = await browser.newContext();
+	const cp = await cc.newPage();
+	await cp.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+	await cp.waitForSelector('.drop-title', { timeout: 30_000 });
+	await cp.evaluate(() => {
+		window.__announced = [];
+		const liveSel = '[aria-live], [role="status"], [role="alert"], [role="log"]';
+		/* A characterData mutation targets a Text node, and `closest()` is an
+		 * Element method - so walking up from the raw target silently skipped
+		 * every text change inside a live region, which is exactly the mutation
+		 * that matters here. Start from the parent element when the target is
+		 * not an element. */
+		const hostOf = (node) => {
+			const el = node?.nodeType === 1 ? node : node?.parentElement;
+			return el?.closest?.(liveSel) ?? null;
+		};
+		const obs = new MutationObserver((records) => {
+			for (const r of records) {
+				const host = hostOf(r.target);
+				if (!host) continue;
+				const t = (host.textContent ?? '').replace(/\s+/g, ' ').trim();
+				if (t) window.__announced.push(t.slice(0, 90));
+			}
+		});
+		obs.observe(document.body, { subtree: true, childList: true, characterData: true });
+	});
+	await selectPdf(cp, minimalPdf());
+	await compress(cp);
+
+	// The region must survive completion, and must say what happened. Reading
+	// it back directly is stronger than inferring from mutation records: it
+	// asserts both that the text is present and that it is still mounted.
+	const completion = await cp.evaluate(() => {
+		const regions = [...document.querySelectorAll('[aria-live], [role="status"]')];
+		const withText = regions.map((r) => ({
+			role: r.getAttribute('role'),
+			live: r.getAttribute('aria-live'),
+			text: (r.textContent ?? '').replace(/\s+/g, ' ').trim()
+		}));
+		return {
+			count: regions.length,
+			done: withText.find((r) => /smaller than the original|no size reduction|larger than the original/i.test(r.text)) ?? null,
+			all: withText
+		};
+	});
+
+	check(
+		'completion is announced in a live region',
+		completion.done !== null,
+		`${completion.count} live region(s); texts: ${completion.all.map((r) => r.text.slice(0, 40) || '(empty)').join(' | ')}`
+	);
+	await cc.close();
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n[10] icons render as inline SVG from the local bundle');
 {
 	const { page, context, requests } = await newPage();
@@ -600,12 +945,48 @@ console.log('\n[10] icons render as inline SVG from the local bundle');
 
 	await context.close();
 }
+}
 
 // ---------------------------------------------------------------------------
-await browser.close();
-server.close();
+const perEngine = [];
+for (const [name, engine, options] of selected) {
+	currentEngine = name;
+	const before = { passed, failed };
+	console.log(`\n${'='.repeat(72)}`);
+	console.log(`Browser end-to-end verification — ${name}`);
+	console.log(`${'='.repeat(72)}\n`);
 
-console.log(`\n${passed} passed, ${failed} failed`);
+	let browser;
+	try {
+		browser = await engine.launch(options);
+	} catch (err) {
+		failed++;
+		failures.push(`${name}: engine failed to launch — ${String(err.message).split('\n')[0]}`);
+		console.log(`  FAIL  ${name}: engine failed to launch — ${String(err.message).split('\n')[0]}`);
+		continue;
+	}
+
+	try {
+		await runSuite(browser);
+	} catch (err) {
+		// One uncaught error must not abandon the remaining engines.
+		failed++;
+		failures.push(`${name}: suite aborted — ${String(err.message).split('\n')[0]}`);
+		console.log(`  FAIL  ${name}: suite aborted — ${String(err.message).split('\n')[0]}`);
+	} finally {
+		await browser.close().catch(() => {});
+	}
+
+	perEngine.push([name, passed - before.passed, failed - before.failed]);
+}
+
+console.log(`\n${'='.repeat(72)}`);
+for (const [name, p, f] of perEngine) {
+	console.log(`  ${name.padEnd(10)} ${String(p).padStart(3)} passed, ${f} failed`);
+}
+console.log(`${'='.repeat(72)}`);
+console.log(`\n${passed} passed, ${failed} failed across ${selected.length} engine(s)`);
+server.close();
 if (failures.length) {
 	console.log('\nFailures:');
 	failures.forEach((f) => console.log(`  - ${f}`));

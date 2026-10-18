@@ -76,6 +76,52 @@ jobs:
       - name: Verify text-layer preservation
         run: bun run test:text-integrity
 
+      # The Unicode layer. The text suite above compares font-encoded bytes,
+      # which for a Type0 /Identity-H font are CIDs that mean nothing without
+      # the /ToUnicode CMap - so a compressor that destroyed every mapping in a
+      # document would pass everything above while leaving search, copy-paste
+      # and screen readers with nothing.
+      - name: Verify the /ToUnicode CMap parser
+        run: bun run test:cmap
+
+      - name: Verify /ToUnicode mappings survive compression
+        run: bun run test:unicode-integrity
+
+      - name: Verify extracted characters survive compression
+        run: bun run test:unicode-extraction
+
+      # Proves the semantic structure comparison can actually fail. It was once dead
+      # code: an early return left the whole per-page block unreachable, so
+      # annotations, link targets and page geometry were never compared.
+      - name: Verify the structure comparison detects damage
+        run: bun run test:structure-control
+
+      # Proves the object indexer handles the body forms real documents use.
+      # It once lost 80 of 197 objects on a real 10-page file, including all 16 of
+      # its /ToUnicode maps, because it searched forward for the next `<<` past
+      # objects whose body is a bare string or array. No suite noticed: across
+      # the 40 fixtures that existed then, those forms occurred zero times, so
+      # the failing path was unreachable rather than merely untested.
+      - name: Verify the parser against real document forms
+        run: bun run test:parser-realism
+
+      # Flate expands by ~1032:1. An inflate with no ceiling allocated the whole
+      # decoded payload before any check could run: a 100 KB stream produced
+      # 100 MB and +156 MB of heap, and qpdf accepted the file. That is an
+      # allocation failure rather than a catchable error, so it takes the worker
+      # down instead of failing a candidate. Now refused, and the image skipped
+      # rather than replaced by a truncated prefix.
+      - name: Verify resource limits refuse a decompression bomb
+        run: bun run test:resource-limits
+
+      # Image replacement splices every edit in one pass instead of rebuilding
+      # the document string per image, which allocated ~191 MB on a 33-image
+      # file. A performance change to a path that rewrites stream lengths is
+      # high risk, so the assertion that matters is that replacing images one at
+      # a time gives byte-identical output to replacing them all at once.
+      - name: Verify batched image replacement matches incremental replacement
+        run: bun run test:image-replacements
+
       # Catches the class of defect that passes every structural check:
       # deduplication blanking a page while the file stays valid.
       - name: Verify structural and semantic preservation

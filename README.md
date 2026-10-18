@@ -12,6 +12,9 @@ bun run build     # static production build into ./build
 bun run preview   # serve the production build
 ```
 
+MIT licensed. See [LICENSE](LICENSE), [CHANGELOG](CHANGELOG.md),
+[SECURITY](SECURITY.md) and [CONTRIBUTING](CONTRIBUTING.md).
+
 ---
 
 ## Deploying
@@ -157,16 +160,16 @@ neither does a lossy run on a document with no JPEG images.
 
 ## Verified numbers
 
-Measured by `bun run bench` over the committed fixture corpus (37 PDFs; see
+Measured by `bun run bench` over the committed fixture corpus (42 valid PDFs; see
 [scripts/FIXTURES.md](scripts/FIXTURES.md)). Every output is independently
 re-validated with `qpdf --check`, and the three deliberately-invalid fixtures
 are **excluded from the totals** rather than counted as wins.
 
 | Mode | In | Out | Reduction | Smaller | Unchanged | Larger | Failed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Lossless | 3,487,746 | 2,377,285 | **31.84%** | 12 | 24 | 0 | 4 |
-| Balanced | 3,487,746 | 1,876,857 | **46.19%** | 22 | 15 | 0 | 3 |
-| Maximum | 3,487,746 | 1,343,414 | **61.48%** | 22 | 15 | 0 | 3 |
+| Lossless | 3,494,272 | 2,382,648 | **31.81%** | 16 | 25 | 0 | 4 |
+| Balanced | 3,494,272 | 1,795,031 | **48.63%** | 26 | 16 | 0 | 3 |
+| Maximum | 3,494,272 | 1,316,904 | **62.31%** | 26 | 16 | 0 | 3 |
 
 (The four Lossless "failures" against three for the others is `jpeg-corrupt.pdf`:
 `qpdf --check` decodes DCTDecode streams, so Lossless's validation of the
@@ -250,6 +253,57 @@ and drop the duplicate outright.
 Savings were unaffected — marginally better, in fact, since no alias headers
 are kept. This is a correctness fix, not a compression trade.
 
+### The bug no fixture could reach
+
+A real 10-page Bengali document decoded **0 of 10 pages** of text. The object
+indexer underneath the Unicode decoder was at fault: it searched forward for the
+next `<<` to find each object's dictionary, so any object whose body is a *bare
+string or array* made it swallow everything up to the next dictionary.
+
+```
+  87 0 obj                 88 0 obj
+  (Adobe)                  [ -988 -486 988 808 ]
+  endobj                   endobj
+```
+
+That document has 32 of each, and the index found **117 of its 197 objects** —
+every one lost was a string, array or stream, and all **16 of its `/ToUnicode`
+maps** were among them.
+
+Three more faults in the same function were reachable from ordinary files: braces
+inside string *literals* were counted, so one `(...)` containing `>>` corrupted
+every dictionary after it; one malformed object made the scanner `break` and
+abandon the rest of the file; and the `endstream` fallback took the *first* match,
+which lands inside a compressed payload often enough to be routine.
+
+Now **197 of 197**, and the document's **10,932 Bengali characters are identical
+across all three modes**.
+
+The reason no suite caught it is the part worth keeping. Measured across the 40
+fixtures that existed at the time:
+
+| Form | In the corpus | In that document |
+| --- | --- | --- |
+| bare string objects | 0 | 32 |
+| bare array objects | 0 | 32 |
+| indirect `/Resources` | 0 | 10 |
+| `/Contents` as an array | 0 | 10 |
+
+Zero. Those paths were not *under*-tested — they were **unreachable**, and a
+user's file was the first thing to walk them. Two of the four came from a second
+real document, so the corpus now grows from measurements rather than guesses.
+
+`test:parser-realism` asserts the general rule rather than the specific case: for
+every fixture, **no dictionary object may be skipped**. That catches document
+shapes nobody has thought of yet, which a per-fixture "the expected objects are
+present" check cannot.
+
+One detail that nearly hid the fix: the suites read QPDF-flattened text, and
+**flattening silently deletes bare string and array objects**. A completeness
+check run on flattened output passes having never examined them, so that suite
+runs on raw bytes instead — with a control asserting the deletion really happens,
+so the reason cannot quietly stop being true.
+
 ### Before the orchestrator
 
 The engine before this was a single `qpdf` structural pass: **0.15%** over the
@@ -257,8 +311,8 @@ same fixtures, and it made **5 of 8 files larger**.
 
 | | Before | After (lossless) |
 | --- | --- | --- |
-| Total reduction | 0.15% | 31.84% |
-| Fixtures that got larger | 5 of 8 | 0 of 37 |
+| Total reduction | 0.15% | 31.81% |
+| Fixtures that got larger | 5 of 8 | 0 of 42 |
 | Strategies tried | 1 | up to 6 |
 
 ---
@@ -270,17 +324,24 @@ same fixtures, and it made **5 of 8 files larger**.
 | `bun run check` | Type checking | 0 errors, 0 warnings |
 | `bun run test:engine` | QPDF behaviour, options, exit codes | 32 passed, 5 skipped |
 | `bun run test:pipeline` | Orchestrator contracts on the savings corpus | 42 passed |
-| `bun run test:integrity` | **290 assertions** across all 37 fixtures | 290 passed |
-| `bun run test:fidelity` | **57 raster comparisons**, decoded pixels | 56 passed |
+| `bun run test:integrity` | **320 assertions** across 42 fixtures | 320 passed |
+| `bun run test:structure-control` | Proves the structure comparison can fail. It once couldn't — the per-page block was unreachable | 12 controls, 0 wrong |
+| `bun run test:fidelity` | **64 raster comparisons**, decoded pixels | 56 passed |
 | `bun run test:text-extract` | Text extractor grammar + comparator controls | 47 passed |
-| `bun run test:text-integrity` | **150 page comparisons**, text payload per mode | 115 passed |
+| `bun run test:text-integrity` | **168 page comparisons**, text payload per mode, through the real pipeline | 130 passed |
+| `bun run test:cmap` | `/ToUnicode` CMap parser: codespacerange, `bfchar`, both `bfrange` forms | 45 passed |
+| `bun run test:parser-realism` | Object indexer vs. the body forms real documents use. Runs on raw bytes | 53 passed |
+| `bun run test:resource-limits` | A decompression bomb is refused, never honoured | 11 passed |
+| `bun run test:unicode-integrity` | Every `/ToUnicode` mapping survives compression unchanged | 131 passed — 9 CMaps, 102 mappings |
+| `bun run test:unicode-extraction` | The characters each page renders as, per mode | 128 passed — 12 pages, 117 characters |
 | `bun run test:visual-comparator` | Visual comparator logic + negative controls. No browser | 32 passed |
-| `bun run test:visual` | **150 page comparisons**, original vs compressed, rendered | 111 passed |
+| `bun run test:visual` | **168 page comparisons**, original vs compressed, rendered | 126 passed |
 
 The visual suite is included in `bun run test` because its runtime is reasonable
 (roughly a minute). It needs Chromium via Playwright, which `test:browser`
 already requires.
-| `bun run test:browser` | Real Chromium: UI, privacy, lazy loading, modes, wrapped/ICC images | 72 passed |
+| `bun run test:browser` | **Chromium, Firefox and WebKit**: UI, privacy, lazy loading, modes, wrapped/ICC images, accessibility | 92 per engine, 276 total |
+| `bun run test:mobile` | **3 engines × 3 viewports**: overflow, tap targets, phone upload | 99 passed |
 | `bun run test:live` | The deployed site | 16 passed |
 | `bun run bench` | The numbers above | — |
 
@@ -403,19 +464,64 @@ Stated plainly rather than glossed over:
   a threshold that could be tuned away. Text and layout are covered instead by
   the `identical` policy — every document with no eligible image is held to an
   exact match, and those are the pages where text damage would show.
-* **Extractable text is compared, but only as font-encoded bytes.** See
-  [Text-layer preservation](#text-layer-preservation) below. The ordered string
-  payloads handed to `Tj` / `TJ` / `'` / `"` are compared byte-for-byte per page,
-  but those bytes are *not* Unicode — mapping them to characters needs the
-  font's encoding and its `/ToUnicode` CMap, neither of which is consulted.
-  So this proves nothing is dropped or altered; it does not prove correct text
-  extraction, reading order, or accessibility.
+* **Extracted characters are compared, not reading order.** Characters are
+  derived from the document's *own* `/ToUnicode` maps and compared per page
+  across all three modes (see [Text-layer preservation](#text-layer-preservation)).
+  That proves compression doesn't alter what the document's own map says. It does
+  **not** prove the map is *correct* — if a document's `/ToUnicode` is wrong,
+  these suites agree with the wrong answer. Reading order, tagged-PDF correctness
+  and screen-reader support are unverified.
+* **156 of 168 pages have no usable CMap and cannot be checked this way.** They
+  are excluded and counted, never assumed to be empty. Character coverage is
+  therefore 12 pages of the corpus, not all of it.
+* **The byte-level text payloads are compared separately**, so a change invisible
+  to the CMap is caught too. Neither comparison implies the other: bytes can be
+  identical while a mapping was altered, or vice versa.
+* **Resource limits are enforced per inflate, not per document.** A single
+  Flate stream may decode to at most 128 MB. Flate expands by ~1032:1, so
+  without that ceiling a 10 MB PDF could ask for ~10 GB — an allocation failure
+  rather than a catchable error, which in a worker takes the tab down instead of
+  failing a candidate. Past the ceiling the payload is **skipped, never
+  truncated**: a truncated prefix of a JPEG is a corrupt file, the one outcome
+  this project must not produce. The ceiling is far above any legitimate image
+  (a 600 DPI A4 scan is ~26 MB). See `test:resource-limits`.
 * **Font behaviour is renderer-dependent.** Both sides share one renderer and
   one font environment, so a difference means the PDF changed — but a document
   relying on a font absent from this environment renders differently on a
   machine that has it. PDF.js is pinned to reduce this; it is not eliminated.
 * **Digital signatures are not tested**, only disclosed as invalidated.
 * Optional content (layers) has no fixture; it is unverified.
+* **Three document forms are still unverified**, and are named rather than
+  covered. `test:parser-realism` measures the parser against every body form the
+  real documents in this repo's history exhibited, but it has no fixture for:
+  * **compressed object streams** (`/ObjStm`) — objects packed into a stream,
+  * so an object indexer that reads the file linearly never sees them;
+  * **cross-reference streams** — the table itself lives in a stream;
+  * **inline images** (`BI…ID…EI`).
+
+  No example of any exists in the two real documents this coverage was derived
+  from, so a fixture would be written from the specification rather than from
+  something observed. QPDF handles all three during compression, which is why
+  the risk is confined to the *test-side* object indexer and not to the
+  compressor itself.
+
+  This was checked, not assumed: both real documents were flattened and
+  surveyed. Object counts came out **0** in each — no `/ObjStm`, no
+  `/Type /XRef`. That is a fact about *those two files*, not about PDFs.
+
+  Practical consequence: a document using compressed object streams would have
+  its text and font objects hidden from `test:parser-realism`'s index, so that
+  suite would report fewer objects and still pass. The compressor itself is
+  unaffected — QPDF reads and rewrites these forms, which is the same reason
+  the stage's real-document results are trustworthy.
+
+* **Bare string and array objects are not indexed, by design.**
+  `5 0 obj (Adobe) endobj` has no dictionary to store, so the indexer steps over
+  it. What is asserted is that *nothing after it is lost* — which is the defect
+  that lost 80 objects in 197 on a real document. Worth knowing separately
+  because the tool used by the test suites (QPDF flattening) silently deletes
+  these objects, so a completeness check run on flattened output would appear to
+  pass while never having examined them.
 * **Annotations are not rendered.** PDF.js is configured not to draw them, so a
   changed annotation is caught structurally but not visually.
 * Thresholds in `test-fidelity.mjs` and `test:visual` are **regression bounds**,
@@ -431,6 +537,108 @@ detecting, the rendered-page suite would go green while proving nothing.
 would have to install on every push. It runs in `bun run test` locally and is
 the gate before a release. Playwright can be provisioned with
 `bunx playwright install --with-deps chromium` if you want it in CI too.
+
+### Which browsers this is verified in
+
+`bun run test:browser` runs the whole browser suite in **Chromium, Firefox and
+WebKit**, and each engine must pass. Measured, same fixtures, byte-identical
+output in all three:
+
+| engine | version tested | result |
+| --- | --- | --- |
+| Chromium | Playwright full build | 92 passed, 0 failed |
+| Firefox | 157.0 | 92 passed, 0 failed |
+| WebKit | 27.2 (Playwright build) | 92 passed, 0 failed |
+
+That covers both WASM modules loading, the worker, `DecompressionStream`, and a
+stream that must be cancelled — the parts that decide whether a PDF can be
+compressed at all. WebKit is slower: 1.7–2.9× Chromium on identical input and
+identical output.
+
+### Browser support policy
+
+**Safari is unverified.** Playwright's WebKit is not Safari. It shares an engine
+but not a release process, a memory model or an update cadence, and it is not a
+proxy for one. No Mac was available to test on, so this project makes no claim
+about Safari in either direction. Treat it as untested rather than as supported.
+
+The table above records the **current** Playwright build of each engine, not a
+version range. Nothing below has been tested at a pinned version.
+
+For a floor, the binding constraint is `color-mix()` in the stylesheet's derived
+tokens — not WebAssembly or the Worker API, both of which are far older:
+
+| feature | used for | lands in |
+| --- | --- | --- |
+| `color-mix()` | `--primary-soft`, `--danger-soft` | Safari 16.2 · Chrome 111 · Firefox 113 |
+| `DecompressionStream` / `CompressionStream` | Flate encode and decode | Safari 16.4 · Chrome 80 · Firefox 113 |
+| `Array.prototype.at()` | vendored QPDF glue | Safari 15.4 |
+
+So the derived floor is **Safari 16.4 · Chrome 111 · Firefox 113**. This is
+computed from feature availability and is **not measured** — the suite was never
+run on those exact versions. Read it as a reason not to assume older browsers
+work, not as a tested claim.
+
+Absent `DecompressionStream` the app does not throw. `src/lib/qpdf/zip.ts`
+checks for it and returns `null`, so compression is skipped rather than the file
+failing.
+
+### Accessibility
+
+`test:browser` asserts these in every engine, against the rendered DOM:
+
+| property | assertion |
+| --- | --- |
+| Compression progress is spoken | `role="status"`, `aria-live="polite"`, and it announces **changing** text rather than one static string |
+| Failures are spoken assertively | `role="alert"` carrying real text, not an empty shell |
+| The mode selector is a real control | `role="radiogroup"`, three named radios, exactly one checked |
+| Failure lands on the keyboard | the alert carries `tabindex="-1"` and receives focus when it appears |
+| Completion is spoken | a separate, permanently mounted live region. The progress panel lives inside `{#if busy}` and is destroyed when compression ends, so without this the whole operation finished in silence — measured at **0 announcements** |
+| The busy spinner stops moving | under `prefers-reduced-motion: reduce` nothing loops forever. It is removed, not merely slowed |
+| Errors name your file, not the engine's | the raw diagnostic is kept but QPDF's scratch name (`in_<random>_0.pdf`) is replaced with the file you chose |
+
+**What this is not.** These assertions read the accessibility tree and the live
+region's text. They are strong evidence the markup is correct, but they are not
+a substitute for a run with a real screen reader, which has not been done.
+
+### Mobile
+
+`bun run test:mobile` runs the same three engines at three viewports — 360×740,
+390×844 and 320×568 — and asserts:
+
+* **no horizontal overflow**, checked on load, with the options panel open, and
+  on the result panel
+* **tap targets of at least 44 px** (WCAG 2.5.5, enhanced) for the drop area, the
+  primary action, the mode chips and the download link
+* **upload through the file input** — the route a phone actually uses, since
+  there is no drag and drop on a touchscreen
+* a complete upload through to a downloadable result
+
+It found two real defects on its first run, both invisible to the 225 desktop
+assertions: the primary action was **39 px** tall and the mode chips **30 px**, at
+every viewport in every engine. Both now carry `min-height: 44px`.
+
+**This is not a device lab.** Viewports, not hardware: no touch physics, no
+mobile Safari, no Android Chrome, no throttled CPU or slow network. Playwright's
+desktop engines at phone dimensions is not the same claim as "works on a phone".
+A mid-range phone is several times slower than any of these, and nothing here
+measures whether a Maximum run on a large document is tolerable there.
+
+### What this does not establish, stated plainly:
+
+* **Playwright's WebKit is not Safari.** It is an open-source WebKit build
+  without Apple's proprietary additions. Passing there is evidence about the
+  WebKit engine, not a guarantee for Safari on macOS or iOS.
+* **No mobile Safari or Android Chrome has been tested** — see above.
+* **No minimum versions are claimed.** One build of each engine was tested, so
+  there is no floor. Playwright ships older builds, so establishing one is
+  straightforward work, not research.
+* Chromium derivatives (Edge, Brave, Opera) are untested.
+
+Where a required API is missing the app **degrades rather than breaks**:
+`makeZip()` returns `null` when `CompressionStream`/`DecompressionStream` are
+absent, and such images are skipped instead of corrupted. An old browser would
+therefore produce a *larger* file rather than an error.
 
 ### Upgrading PDF.js
 
@@ -739,8 +947,8 @@ failure. An original page *without* text whose candidate also has none is a
 pass — a scanned or blank page is legitimate, and the requirement is
 preservation, not the presence of a text layer.
 
-**Coverage.** All 37 valid fixtures × all three modes: 111 document comparisons,
-150 page comparisons. 36 of those runs carry text, 75 are image-only or blank and
+**Coverage.** All 42 valid fixtures × all three modes: 126 document comparisons,
+168 page comparisons. 51 of those runs carry text, 75 are image-only or blank and
 are expected to carry none. The three deliberately-broken fixtures are excluded as
 not being renderable documents, each reason stated in code.
 
@@ -753,19 +961,42 @@ the identical path — and asserts the corrupted file still passes `qpdf --check
 so the control proves text detection rather than merely proving qpdf rejects
 broken files.
 
-**What this does NOT prove.** This is an operand-preservation regression suite,
-not an accessibility validator. Comparing these operands does **not** prove
-correct Unicode extraction, correct reading order, tagged-PDF correctness,
-preservation of `/ToUnicode` CMaps, or screen-reader support. Two documents with
-different encodings can render identically and differ here. Both suites are
-needed:
+**Unicode is a separate axis, and is checked separately.** The bytes above are
+*font-encoded*, not Unicode. Mapping them to characters needs the font's encoding
+and its `/ToUnicode` CMap, so `test:unicode-integrity` and
+`test:unicode-extraction` cover that on its own:
 
-| Visual | Text | Meaning |
-| --- | --- | --- |
-| Pass | Pass | Both checked properties preserved within their policies |
-| Pass | **Fail** | Looks right, text changed — reject the candidate |
-| **Fail** | Pass | Text intact, rendered output changed — existing visual policy |
-| Fail | Fail | Both invariants violated |
+* **mappings** — every `bfchar` / `bfrange` entry in every `/ToUnicode` map, from
+  all 9 CMaps in the corpus (102 mappings), must survive all three modes.
+* **characters** — for the 12 pages whose fonts carry a usable CMap (117
+  characters), the decoded string must be identical across modes.
+
+The remaining **156 pages are not decodable**. They are excluded *and counted*,
+never treated as empty — treating "no CMap" as "no text" is how a document with
+every mapping destroyed compares equal to itself. This distinction was not
+cosmetic: `fontCMapsForPage` once looked for `/Font` only in the page dictionary,
+so a real document that puts `/Resources` behind a reference yielded zero CMaps,
+every page decoded to nothing, and the suite passed.
+
+What Unicode coverage still does **not** prove: that a document's own
+`/ToUnicode` map is *correct*. These suites prove compression doesn't alter what
+the document says its characters are. If the map is wrong, they agree with the
+wrong answer. Reading order, tagged-PDF correctness and screen-reader support
+are unverified.
+
+**What the byte-level suite does NOT prove.** It is an operand-preservation
+regression suite, not an accessibility validator. Comparing these operands does
+**not** prove correct reading order, tagged-PDF correctness, or screen-reader
+support. Two documents with different encodings can render identically and differ
+here. All three suites are needed:
+
+| Visual | Text bytes | Characters | Meaning |
+| --- | --- | --- | --- |
+| Pass | Pass | Pass | All three checked properties preserved within their policies |
+| Pass | **Fail** | — | Looks right, text changed — reject the candidate |
+| Pass | Pass | **Fail** | Bytes identical, but a `/ToUnicode` mapping was altered |
+| **Fail** | Pass | Pass | Text intact, rendered output changed — existing visual policy |
+| Fail | Fail | — | Both invariants violated |
 
 ## Page-level visual regression
 
@@ -806,6 +1037,7 @@ src/
       bytes.ts             latin1 <-> bytes (no Buffer/TextDecoder)
       options.ts           the verified option set -> qpdf argv
       protocol.ts          worker message types
+      zip.ts               bounded Flate codec (shared by the worker and its tests)
       worker.ts            engine in the worker: runner, codec, orchestration
       client.ts            worker lifecycle, original-bytes retention
     vendors/
@@ -825,13 +1057,16 @@ scripts/
   lib/visual.mjs           visual comparator: metrics, geometry, mode policies
   lib/textlayer.mjs        content-stream tokenizer + text-payload extractor
   lib/textcompare.mjs      text-signature comparison and diagnostics
+  lib/cmap.mjs             /ToUnicode CMap parser (codespacerange, bfchar, both bfrange forms)
+  lib/unicode.mjs          /ToUnicode lookup + character extraction per page
+  lib/fixture-manifest.mjs  what each fixture is and what must happen to it  (above)
   lib/render.mjs           PDF.js-in-Chromium rendering harness
   lib/visual-page.mjs      in-page half of the renderer
   generate/                fixture generators (see scripts/README.md)
   test/                    the suites
   tools/                   benchmarks, explain, screenshots
   probe/                   one-off engine investigations
-  fixtures/                37 committed PDFs; see scripts/FIXTURES.md
+  fixtures/                45 committed PDFs (42 valid, 3 deliberately invalid); see scripts/FIXTURES.md
   README.md                how the scripts folder is laid out
   FIXTURES.md              fixture corpus documentation
 ```
@@ -868,7 +1103,7 @@ valid JPEG data.
 | `bun run dev` | Dev server |
 | `bun run build` | Static production build |
 | `bun run check` | `svelte-check` type checking |
-| `bun run fixtures` | Regenerate the 37 committed fixtures |
+| `bun run fixtures` | Regenerate the 45 committed fixtures |
 | `bun run bench` | Orchestrator over every fixture × mode, with per-file detail |
 | `bun run bench:legacy` | The old single-pass engine, for comparison |
 | `bun run explain <file.pdf> [mode]` | Why a document did or did not shrink, image by image |
@@ -879,11 +1114,20 @@ valid JPEG data.
 | `bun run test:fidelity` | Decoded-pixel fidelity for the lossy modes |
 | `bun run test:text-extract` | Text extractor grammar + comparator negative controls (no engine, no browser) |
 | `bun run test:text-integrity` | Text payload preserved per page, per mode, across the corpus |
+| `bun run test:structure-control` | Proves the structure comparison can fail |
+| `bun run test:cmap` | `/ToUnicode` CMap parser |
+| `bun run test:parser-realism` | Object indexer vs. the body forms real documents use |
+| `bun run test:resource-limits` | Decompression-bomb refusal, end to end |
+| `bun run test:unicode-integrity` | Every `/ToUnicode` mapping survives compression |
+| `bun run test:unicode-extraction` | Characters a page renders as, per mode |
+| `bun run verify:file <file.pdf> [mode]` | Run a real document locally, with per-check output |
 | `bun run test:visual-comparator` | Visual comparator logic + negative controls (no browser) |
 | `bun run test:visual` | Rendered-page comparison, original vs compressed, per mode |
 | `bun run test:visual -- --measure` | Print every measured page metric, assert nothing |
 | `bun run test:visual -- --diagnose` | Write original / candidate / diff PNGs on failure |
-| `bun run test:browser` | Build + verify the real UI in Chromium |
+| `bun run test:browser` | Build + verify the real UI in Chromium, Firefox and WebKit |
+| `bun run test:browser -- webkit` | Verify in one engine only |
+| `bun run test:mobile` | Verify at three phone viewports in all three engines |
 | `bun run test:live` | Verify the deployed site end-to-end |
 | `bun run test` | All of the above |
 | `bun run screenshots` | Capture every UI state to `.screenshots/` |

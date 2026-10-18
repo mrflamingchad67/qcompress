@@ -239,22 +239,35 @@ export function applyReplacements(
 
 	if (!targets.length) return null;
 
-	let out = s;
-	let applied = 0;
-	let bytesSaved = 0;
+	// Edits are collected and spliced ONCE at the end.
+	//
+	// This used to rebuild the whole document string inside the loop:
+	//
+	//     out = out.slice(0, dictStart) + dict + ... + out.slice(...)
+	//
+	// That is a full copy per replaced image. Measured on the 32-page book -
+	// 33 images, a 2.9 MB document held as a 5.8 MB JS string because PDF text
+	// is carried as UTF-16 - it allocated about 191 MB, and that churn was the
+	// largest single contributor to the run's peak heap.
+	//
+	// Processing newest-first means every edit lands AFTER the offsets the
+	// remaining edits will read, so the recorded `dictStart` / `dataStart` /
+	// `length` stay valid against the ORIGINAL string. That is what makes a
+	// single pass safe, and it is why the sort above is not incidental.
+	const edits: { start: number; end: number; text: string; saved: number }[] = [];
 
 	for (const { img, rep } of targets) {
 		// Use the dictionary offset recorded at discovery. Searching backwards
-		// for '<<' is wrong: an image dictionary commonly contains nested
+		// for '<<' is wrong: an image dictionary commonly containes nested
 		// dictionaries (/DecodeParms [ null << /Quality 60 >> ]), and the
 		// nearest '<<' is that inner one, so /Length would never be found and
 		// the payload would be spliced into a stream whose declared length
 		// still describes the old data.
 		const dictStart = img.dictStart;
-		const dictEnd = matchDict(out, dictStart);
+		const dictEnd = matchDict(s, dictStart);
 		if (dictStart === -1 || dictEnd === -1 || dictEnd > img.dataStart) continue;
 
-		let dict = out.slice(dictStart, dictEnd);
+		let dict = s.slice(dictStart, dictEnd);
 
 		// New payload length. If /Length cannot be located the replacement is
 		// abandoned rather than applied: a stream whose declared length no
@@ -272,19 +285,29 @@ export function applyReplacements(
 		// Replace the dict, then swap exactly the declared payload. Everything
 		// between the dict end and the payload (the `stream` keyword and its
 		// EOL) must be preserved, and everything after the payload is untouched.
-		out =
-			out.slice(0, dictStart) +
-			dict +
-			out.slice(dictEnd, img.dataStart) +
-			payload +
-			out.slice(img.dataStart + img.length);
-
-		applied++;
-		bytesSaved += img.length - rep.jpeg.length;
+		edits.push({
+			start: dictStart,
+			end: img.dataStart + img.length,
+			text: dict + s.slice(dictEnd, img.dataStart) + payload,
+			saved: img.length - rep.jpeg.length
+		});
 	}
 
-	if (!applied) return null;
-	return { text: out, applied, bytesSaved };
+	if (!edits.length) return null;
+
+	// One pass, front to back, copying each untouched span exactly once.
+	edits.sort((a, b) => a.start - b.start);
+
+	let text = '';
+	let cursor = 0;
+	for (const edit of edits) {
+		text += s.slice(cursor, edit.start) + edit.text;
+		cursor = edit.end;
+	}
+	text += s.slice(cursor);
+
+	const bytesSaved = edits.reduce((total, e) => total + e.saved, 0);
+	return { text, applied: edits.length, bytesSaved };
 }
 
 /** Convert a PDF byte string into bytes. */

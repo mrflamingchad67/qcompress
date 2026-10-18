@@ -124,6 +124,16 @@ export function makeRunner({ password = '', decrypt = true } = {}) {
 }
 
 /**
+ * Ceiling on the output of a single inflate, matching the worker.
+ *
+ * Flate expands by ~1032:1, so a modest document can request gigabytes of
+ * decoded samples. `inflateSync` would allocate all of it before returning,
+ * so the size is checked *while* decompressing rather than after. Enforced here
+ * as well as in the worker so a pathological fixture cannot take down CI.
+ */
+export const MAX_INFLATE_BYTES = 128 * 1024 * 1024;
+
+/**
  * Inflate/deflate, for images stored Flate-wrapped around a JPEG.
  *
  * Node/Bun have zlib built in. The browser worker does not, so it passes null
@@ -131,7 +141,37 @@ export function makeRunner({ password = '', decrypt = true } = {}) {
  */
 export function makeZip() {
 	return {
-		inflate: async (data) => new Uint8Array(zlib.inflateSync(Buffer.from(data))),
+		/**
+		 * Throws past `MAX_INFLATE_BYTES`. Callers already treat a failed inflate
+		 * as "leave this image alone", so an over-large payload skips the image
+		 * rather than corrupting it.
+		 *
+		 * `maxOutputLength` was verified to THROW (`ERR_BUFFER_TOO_LARGE`) rather
+		 * than hand back a truncated prefix - a truncated prefix here would be a
+		 * corrupt JPEG, which is the one outcome that must not happen. The
+		 * explicit length check is defence in depth in case a runtime ever
+		 * changes that behaviour.
+		 */
+		inflate: async (data) => {
+			/* Bytes in, per the `ZipCodec` contract. The latin1-string -> bytes
+			 * conversion belongs to whoever reads the document as text
+			 * (`installInflate` in unicode.mjs), not here: `Buffer.from(string)`
+			 * is UTF-8, and that mismatch silently destroys any Flate stream
+			 * holding bytes >= 0x80 rather than failing loudly.
+			 *
+			 * `maxOutputLength` was verified to THROW (`ERR_BUFFER_TOO_LARGE`)
+			 * rather than hand back a truncated prefix - a truncated prefix here
+			 * would be a corrupt JPEG, which is the one outcome that must not
+			 * happen. The explicit length check is defence in depth in case a
+			 * runtime ever changes that behaviour. */
+			const out = zlib.inflateSync(Buffer.from(data), { maxOutputLength: MAX_INFLATE_BYTES });
+			if (out.length >= MAX_INFLATE_BYTES) {
+				throw new Error(
+					`inflated stream reaches the ${MAX_INFLATE_BYTES} byte ceiling; the payload was left untouched`
+				);
+			}
+			return new Uint8Array(out);
+		},
 		deflate: async (data) => new Uint8Array(zlib.deflateSync(Buffer.from(data), { level: 9 }))
 	};
 }

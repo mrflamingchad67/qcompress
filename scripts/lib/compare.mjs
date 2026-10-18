@@ -27,9 +27,16 @@ const fmt = (v) => (v === null || v === undefined ? 'unknown' : JSON.stringify(v
  * Both sides must already have been run through `--object-streams=disable`;
  * see readStructure's contract.
  *
+ * @param {{compareImages?: boolean}} [options]
+ *   `compareImages` must be false for the LOSSY modes: re-encoding resizes
+ *   images, so the distinct-image set legitimately changes there. Everything
+ *   else - page geometry, annotations, links, outlines, forms, metadata - must
+ *   be identical in every mode, so this only skips the image comparison.
+ *
  * @returns {{diffs: Array<{field: string, before: string, after: string}>, before: any, after: any}}
  */
-export function compareStructure(beforeText, afterText) {
+export function compareStructure(beforeText, afterText, options = {}) {
+	const compareImages = options.compareImages !== false;
 	const a = readStructure(beforeText);
 	const b = readStructure(afterText);
 	const diffs = [];
@@ -51,30 +58,6 @@ export function compareStructure(beforeText, afterText) {
 	push('hasInfo', a.hasInfo, b.hasInfo);
 	push('hasEncrypt', a.hasEncrypt, b.hasEncrypt);
 	push('hasNames', a.hasNames, b.hasNames);
-
-	/* Images.
-	 *
-	 * The COUNT is deliberately not compared: deduplication legitimately
-	 * removes byte-identical copies, so three identical scans become one image
-	 * object while the document still draws exactly the same pixels on all
-	 * three pages. Counting would report that correct behaviour as drift.
-	 *
-	 * What must hold is that the set of DISTINCT images is unchanged, and that
-	 * every surviving payload was already present in the input (asserted
-	 * separately, byte-for-byte, by the integrity suite).
-	 */
-	const distinct = (s) =>
-		[
-			...new Set(
-				[...s.images.values()].map(
-					(i) => `${i.width}x${i.height} ${i.colorspace} bpc=${i.bitsPerComponent} ${i.filters} smask=${i.hasSMask}`
-				)
-			)
-		].sort();
-
-	push('distinctImages', distinct(a), distinct(b));
-
-	return { diffs, before: a, after: b };
 
 	/* Per page, in display order */
 	const n = Math.max(a.pages.length, b.pages.length);
@@ -107,11 +90,13 @@ export function compareStructure(beforeText, afterText) {
 	 * surviving payload was already present in the input, byte-for-byte, is
 	 * asserted separately by the integrity suite.
 	 */
-	push(
-		'distinctImages',
-		[...new Set([...a.images.values()].map(imageKey))].sort(),
-		[...new Set([...b.images.values()].map(imageKey))].sort()
-	);
+	if (compareImages) {
+		push(
+			'distinctImages',
+			[...new Set([...a.images.values()].map(imageKey))].sort(),
+			[...new Set([...b.images.values()].map(imageKey))].sort()
+		);
+	}
 
 	return { diffs, before: a, after: b };
 }

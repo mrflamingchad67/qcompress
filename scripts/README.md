@@ -34,7 +34,7 @@ Not run directly.
 
 | Command | Needs | Produces |
 | --- | --- | --- |
-| `bun run fixtures` | both | all 37 fixtures |
+| `bun run fixtures` | both | all 45 fixtures |
 | `bun scripts/generate/make-fixtures.mjs` | Chromium | the 8 savings fixtures |
 | `bun scripts/generate/make-integrity-fixtures.mjs` | Bun only | the 29 integrity fixtures |
 
@@ -55,6 +55,72 @@ Run through the package scripts; running one directly works too.
 | `test-visual.mjs` | `bun run test:visual` | rendered-page comparison of original vs compressed, per fixture per mode |
 | `test-text-extract.mjs` | `bun run test:text-extract` | content-stream tokenizer grammar + comparator controls. No engine, no browser. |
 | `test-text-integrity.mjs` | `bun run test:text-integrity` | text payload preserved per page, per mode, through the real pipeline |
+| `test-cmap.mjs` | `bun run test:cmap` | `/ToUnicode` CMap parser: codespacerange, `bfchar`, both `bfrange` forms |
+| `test-unicode-integrity.mjs` | `bun run test:unicode-integrity` | every CMap mapping survives compression, unchanged |
+| `test-unicode-extraction.mjs` | `bun run test:unicode-extraction` | the characters a page actually renders as, per mode |
+| `test-parser-realism.mjs` | `bun run test:parser-realism` | the object indexer against the body forms real documents use |
+| `test-resource-limits.mjs` | `bun run test:resource-limits` | a decompression bomb is refused, never honoured |
+| `test-image-replacements.mjs` | `bun run test:image-replacements` | replacing images one at a time equals replacing them all at once |
+| `test-mobile.mjs` | `bun run test:mobile` | 3 engines × 3 viewports: overflow, 44 px tap targets, phone upload |
+
+### Resource limits
+
+Flate expands by ~1032:1, and `makeZip().inflate` used to decompress to
+completion before any check could run — so the whole decoded payload was
+allocated first. Measured through the real pipeline, on a document QPDF accepted:
+
+```
+ 100 KB stream  ->  100 MB decoded,  +156 MB heap
+```
+
+Scaling that, a 10 MB PDF asks for roughly 10 GB. That is an allocation failure
+rather than a catchable error: in a worker it takes the tab down, and no
+candidate validation ever runs.
+
+Streams are now capped at 128 MB each — far above any legitimate image, since a
+600 DPI A4 scan is about 26 MB. Exceeding the cap **throws**, and both call sites
+already treat a failed inflate as "leave this payload exactly as it was", so the
+image is skipped rather than replaced by a truncated prefix.
+
+That distinction is what the controls are for. "It threw" is not the same claim as
+"it threw *instead of* returning a partial prefix", and a truncated JPEG is a
+corrupt file. So the suite asserts separately that nothing partial comes back, and
+that an ordinary payload — a 24 MB stream — still decodes byte-for-byte, which is
+what stops "it refused the bomb" from being trivially true.
+
+The cap lives in `src/lib/qpdf/zip.ts` rather than in the worker, because Node and
+Bun both provide `DecompressionStream`, `Blob` and `Response`. The suite
+therefore exercises the code the browser runs rather than a Node lookalike of it.
+
+### Parser realism
+
+`parseObjects` once lost 80 of 197 objects on a real 10-page document, including
+all 16 of its `/ToUnicode` maps, because it searched forward for the next `<<`
+past objects whose body is a bare string or array. No suite noticed: across the
+40 fixtures that existed at the time, those forms occurred **zero** times, so the
+failing path was unreachable rather than merely untested.
+
+The assertion is deliberately stronger than "the expected objects are present":
+
+```
+for every fixture:
+    index the RAW bytes
+    assert no dictionary object was skipped
+```
+
+That holds for document shapes nobody has thought of yet, which the weaker form
+cannot.
+
+It runs on **raw bytes, not QPDF-flattened text** — flattening silently deletes
+bare string and array objects, so a check on flattened output passes having never
+examined them. A control asserts that deletion really happens, so the reason
+cannot quietly stop being true.
+
+Its two regression controls feed the scanner a body layout in memory and were
+each verified to **fail under the previous implementation**. One was decorative
+when first written (it asserted object count, but the defect truncated a
+dictionary in place and left the count intact) and was rewritten to target the
+actual symptom.
 
 ### Text-layer preservation
 
