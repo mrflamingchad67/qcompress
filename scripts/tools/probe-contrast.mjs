@@ -287,12 +287,22 @@ async function auditError(theme) {
 
 process.stdout.write('\n');
 
+/*
+ * Counted across the loop so the process can exit non-zero.
+ *
+ * Without this the probe PRINTED the failures and still exited 0 - it was a
+ * report, not a check. Wiring it into CI in that state would have added a step
+ * that looks like a gate and gates nothing, which is the same failure as the
+ * alpha bug this PR already fixed, one level up.
+ */
+let totalFailing = 0;
+
 for (const theme of ['dark', 'light']) {
 	const rows = await audit(theme);
 	const errRows = await auditError(theme);
 	const all = [...rows, ...errRows];
 	const failing = all.filter((r) => !r.pass);
-	const errFailing = errRows.filter((r) => !r.pass);
+	totalFailing += failing.length;
 	process.stdout.write(
 		`  ${theme.toUpperCase().padEnd(6)} ${rows.length} text elements on the success path, ${errRows.length} on the error path, ${failing.length} below WCAG AA\n`
 	);
@@ -302,7 +312,6 @@ for (const theme of ['dark', 'light']) {
 		);
 	}
 	if (!failing.length) process.stdout.write('    (none)\n');
-	void errFailing;
 	process.stdout.write('\n');
 }
 
@@ -320,5 +329,12 @@ server.close();
 
 if (selfBad) {
 	process.stderr.write(`  SELF-TEST FAILED: ${selfBad} of ${KNOWN.length} known ratios not reproduced.\n`);
+	process.exit(1);
+}
+
+if (totalFailing) {
+	process.stderr.write(
+		`  CONTRAST GATE FAILED: ${totalFailing} rendered text element(s) below WCAG AA.\n`
+	);
 	process.exit(1);
 }
