@@ -633,6 +633,12 @@
 		gap: 0.4375rem;
 		align-self: center;
 		min-width: 15rem;
+		/* WCAG 2.5.5 target size (enhanced). The padding alone produced a 39 px
+		 * button at every viewport and in all three engines, so the primary
+		 * action on a touch device sat below the recommended minimum. Expressed
+		 * as min-height rather than more padding so it holds regardless of the
+		 * user's font size. */
+		min-height: 44px;
 		margin: 0.25rem auto 0;
 		padding: 0.5rem 1.25rem;
 		background: var(--primary);
@@ -657,6 +663,8 @@
 		align-items: center;
 		justify-content: center;
 		gap: 0.375rem;
+		/* Same reasoning as .primary: this is a touch target too. */
+		min-height: 44px;
 		padding: 0.5rem 0.75rem;
 		background: var(--bg-card);
 		border: 1px solid var(--border-strong);
@@ -715,6 +723,10 @@
 		display: flex;
 		align-items: center;
 		gap: 0.3125rem;
+		/* Measured at 30 px tall at every viewport in all three engines, which is
+		 * the smallest target on the page and sits directly under the 24 px AA
+		 * floor's comfortable margin. Same reasoning as .primary. */
+		min-height: 44px;
 		padding: 0.25rem 0.5625rem;
 		background: var(--bg-card);
 		border: 1px solid var(--border-strong);

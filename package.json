@@ -37,6 +37,7 @@
     "test:visual": "bun scripts/test/test-visual.mjs",
     "test:visual:measure": "bun scripts/test/test-visual.mjs --measure",
     "test:browser": "bun run build && bun scripts/test/test-browser.mjs",
+    "test:mobile": "bun run build && bun scripts/test/test-mobile.mjs",
     "test:live": "bun scripts/test/test-live.mjs",
     "screenshots": "bun run build && bun scripts/tools/screenshots.mjs",
     "test": "bun run check && bun run test:engine && bun run test:pipeline && bun run test:integrity && bun run test:structure-control && bun run test:fidelity && bun run test:fidelity-control && bun run test:text-extract && bun run test:text-integrity && bun run test:cmap && bun run test:parser-realism && bun run test:resource-limits && bun run test:image-replacements && bun run test:unicode-integrity && bun run test:unicode-extraction && bun run test:visual-comparator && bun run test:visual && bun run test:browser"

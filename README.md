@@ -338,6 +338,7 @@ The visual suite is included in `bun run test` because its runtime is reasonable
 (roughly a minute). It needs Chromium via Playwright, which `test:browser`
 already requires.
 | `bun run test:browser` | **Chromium, Firefox and WebKit**: UI, privacy, lazy loading, modes, wrapped/ICC images | 75 per engine, 225 total |
+| `bun run test:mobile` | **3 engines × 3 viewports**: overflow, tap targets, phone upload | 99 passed |
 | `bun run test:live` | The deployed site | 16 passed |
 | `bun run bench` | The numbers above | — |
 
@@ -551,13 +552,35 @@ stream that must be cancelled — the parts that decide whether a PDF can be
 compressed at all. WebKit is slower: 1.7–2.9× Chromium on identical input and
 identical output.
 
-**What this does not establish, stated plainly:**
+### Mobile
+
+`bun run test:mobile` runs the same three engines at three viewports — 360×740,
+390×844 and 320×568 — and asserts:
+
+* **no horizontal overflow**, checked on load, with the options panel open, and
+  on the result panel
+* **tap targets of at least 44 px** (WCAG 2.5.5, enhanced) for the drop area, the
+  primary action, the mode chips and the download link
+* **upload through the file input** — the route a phone actually uses, since
+  there is no drag and drop on a touchscreen
+* a complete upload through to a downloadable result
+
+It found two real defects on its first run, both invisible to the 225 desktop
+assertions: the primary action was **39 px** tall and the mode chips **30 px**, at
+every viewport in every engine. Both now carry `min-height: 44px`.
+
+**This is not a device lab.** Viewports, not hardware: no touch physics, no
+mobile Safari, no Android Chrome, no throttled CPU or slow network. Playwright's
+desktop engines at phone dimensions is not the same claim as "works on a phone".
+A mid-range phone is several times slower than any of these, and nothing here
+measures whether a Maximum run on a large document is tolerable there.
+
+### What this does not establish, stated plainly:
 
 * **Playwright's WebKit is not Safari.** It is an open-source WebKit build
   without Apple's proprietary additions. Passing there is evidence about the
   WebKit engine, not a guarantee for Safari on macOS or iOS.
-* **No mobile browser has been tested.** No phone viewport has been exercised,
-  and this is a drag-and-drop upload interface.
+* **No mobile Safari or Android Chrome has been tested** — see above.
 * **No minimum versions are claimed.** One build of each engine was tested, so
   there is no floor. Playwright ships older builds, so establishing one is
   straightforward work, not research.
@@ -1053,7 +1076,9 @@ valid JPEG data.
 | `bun run test:visual` | Rendered-page comparison, original vs compressed, per mode |
 | `bun run test:visual -- --measure` | Print every measured page metric, assert nothing |
 | `bun run test:visual -- --diagnose` | Write original / candidate / diff PNGs on failure |
-| `bun run test:browser` | Build + verify the real UI in Chromium |
+| `bun run test:browser` | Build + verify the real UI in Chromium, Firefox and WebKit |
+| `bun run test:browser -- webkit` | Verify in one engine only |
+| `bun run test:mobile` | Verify at three phone viewports in all three engines |
 | `bun run test:live` | Verify the deployed site end-to-end |
 | `bun run test` | All of the above |
 | `bun run screenshots` | Capture every UI state to `.screenshots/` |

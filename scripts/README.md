@@ -60,6 +60,8 @@ Run through the package scripts; running one directly works too.
 | `test-unicode-extraction.mjs` | `bun run test:unicode-extraction` | the characters a page actually renders as, per mode |
 | `test-parser-realism.mjs` | `bun run test:parser-realism` | the object indexer against the body forms real documents use |
 | `test-resource-limits.mjs` | `bun run test:resource-limits` | a decompression bomb is refused, never honoured |
+| `test-image-replacements.mjs` | `bun run test:image-replacements` | replacing images one at a time equals replacing them all at once |
+| `test-mobile.mjs` | `bun run test:mobile` | 3 engines × 3 viewports: overflow, 44 px tap targets, phone upload |
 
 ### Resource limits
 
