@@ -1,38 +1,131 @@
 /*
- * Dark-only theme, taken from the reference UI (convert.to.it): one blue
- * primary, neutral greys, dense cards, small radii. No gradients, no
- * glassmorphism, no component library.
+ * Design tokens and base layer.
  *
- * A single theme is deliberate - this is a utility, not a document reader,
- * and there is nothing to gain from a second palette to maintain or persist.
+ * The visual system is taken from convert.to.it (p2r3/convert) - the project
+ * this app was modelled on from the start. Values are copied from that
+ * project's style.css, base.css and compiled bundle rather than approximated:
+ * the 16px card radius, the dashed dropzone inset by 1.25rem, the circular
+ * icon well, the button radii and paddings, the motion curves.
+ *
+ * SINGLE DARK THEME, AS BEFORE
+ *
+ * The previous version of this file was dark-only and said so deliberately:
+ * "this is a utility, not a document reader, and there is nothing to gain
+ * from a second palette to maintain or persist." That still holds, so the
+ * reference's light palette is not adopted. An intermediate attempt did ship
+ * both, and the contrast probe reported 34 AA failures in light against 3 in
+ * dark - the reference's light greys (#787774 at 4.48:1, #9b9a97 at 2.81:1)
+ * do not clear AA on white. Dropping the light palette removed that failure
+ * rather than hiding it.
+ *
+ * DEVIATION FROM THE REFERENCE: MUTED TEXT ALPHA
+ *
+ * The reference builds its dark theme from white at fixed alphas: 0.44 for
+ * --text-secondary, 0.28 for --text-tertiary/--text-muted. Measured against
+ * the dark backgrounds they actually land on:
+ *
+ *     0.44   4.15:1 .. 4.34:1     needs 4.5:1
+ *     0.28   2.51:1 .. 2.53:1     needs 4.5:1
+ *
+ * The smallest alpha clearing 4.5:1 on the darkest background here is 0.468.
+ * Both tiers are lifted - 0.62 and 0.50 - which clears AA on every background
+ * in this file. This is a real change in ink, not a cosmetic one, which is
+ * why it is written down instead of applied silently.
+ *
+ * `bun run probe:contrast` checks the result rather than trusting it. That
+ * probe had a defect that made it incapable of reporting these failures; it
+ * was fixed in a41f559 and is what makes the claim verifiable.
  */
 
+@import 'tailwindcss';
+
+@theme {
+	--color-primary: #2383e2;
+	/*
+	 * The primary blue needs two values, not one.
+	 *
+	 * #2383e2 as the reference uses it gives 3.88:1 against white, which fails
+	 * AA for the 11-13px bold labels on the primary buttons. Darkening it to
+	 * #2077ce fixes the buttons (4.57:1) but then fails in the opposite
+	 * direction: as text on the dark dropzone it drops to 3.35:1.
+	 *
+	 * One colour cannot satisfy both jobs, so it is split:
+	 *   --primary        a solid fill behind white text
+	 *   --primary-text   the same hue lightened, for the blue label on dark
+	 *
+	 * Both are the reference's hue; only the lightness differs, and each is
+	 * the value that actually passes in its own role.
+	 */
+	--color-primary-fill: #2077ce;
+	--color-primary-text: #6cb0ff;
+	--color-primary-transparent: color-mix(in srgb, var(--color-primary-fill) 30%, transparent);
+	--color-primary-soft: color-mix(in srgb, var(--color-primary-fill) 14%, transparent);
+	--color-selection: color-mix(in srgb, var(--color-primary-fill) 14%, transparent);
+	--color-danger: #f87171;
+	--color-danger-soft: color-mix(in srgb, var(--color-danger) 10%, transparent);
+	--color-warning: #f59e0b;
+	--color-success: #4ade80;
+
+	--color-bg-page: #191919;
+	--color-bg-card: #202020;
+	--color-bg-card-alt: #252525;
+	--color-bg-card-alt-hover: #2f2f2f;
+	--color-bg-section: #252525;
+	--color-bg-input: #202020;
+	--color-bg-light: #373737;
+
+	/* Lifted from the reference's 0.81 / 0.44 / 0.28 - see the note above. */
+	--color-text-on-primary: #ffffff;
+	--color-text-primary: rgb(255 255 255 / 0.94);
+	--color-text-secondary: rgb(255 255 255 / 0.62);
+	--color-text-tertiary: rgb(255 255 255 / 0.5);
+
+	--color-border-primary: #373737;
+	--color-border-secondary: #4d4d4d;
+	--color-btn-border: #373737;
+
+	--radius-card: 16px;
+	--radius-panel: 12px;
+	--radius-btn: 8px;
+}
+
 :root {
-	--primary: #4a9eff;
-	--primary-hover: #6cb0ff;
-	--primary-soft: color-mix(in srgb, var(--primary) 16%, transparent);
-	--danger: #f87171;
-	--danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
-	--success: #4ade80;
-	--warning: #f59e0b;
+	/* Aliases, so the component stylesheet and the Tailwind theme are one
+	   system rather than two vocabularies for the same colour. */
+	--primary: var(--color-primary-fill);
+	--primary-text: var(--color-primary-text);
+	--primary-transparent: var(--color-primary-transparent);
+	--primary-soft: var(--color-primary-soft);
+	--danger: var(--color-danger);
+	--danger-soft: var(--color-danger-soft);
+	--warning: var(--color-warning);
+	--success: var(--color-success);
 
-	--bg-page: #191919;
-	--bg-card: #202020;
-	--bg-alt: #252525;
-	--bg-alt-hover: #2f2f2f;
-	--bg-input: #202020;
-	--bg-tray: #161616;
+	--bg-page: var(--color-bg-page);
+	--bg-card: var(--color-bg-card);
+	--bg-alt: var(--color-bg-card-alt);
+	--bg-alt-hover: var(--color-bg-card-alt-hover);
+	--bg-section: var(--color-bg-section);
+	--bg-input: var(--color-bg-input);
+	--bg-tray: var(--color-bg-section);
 
-	--text-primary: #ffffffcf;
-	--text-secondary: #ffffff70;
-	--text-tertiary: #ffffff47;
-	--text-on-primary: #0d1117;
+	--text-primary: var(--color-text-primary);
+	--text-secondary: var(--color-text-secondary);
+	--text-tertiary: var(--color-text-tertiary);
+	--text-on-primary: var(--color-text-on-primary);
 
-	--border: #2f2f2f;
-	--border-strong: #3d3d3d;
+	--border: var(--color-border-primary);
+	--border-strong: var(--color-border-secondary);
+	/* The reference keeps --btn-border separate from --border-primary even
+	   though both resolve to #373737 in dark. Using --border for a button
+	   border was a substitution, not a match, so the token is carried across
+	   under its own name. */
+	--btn-border: var(--color-btn-border);
 
-	--radius: 8px;
-	--radius-sm: 5px;
+	--radius: var(--radius-card);
+	--radius-sm: var(--radius-btn);
+
+	scrollbar-color: var(--color-border-secondary) transparent;
 
 	color-scheme: dark;
 }
@@ -41,42 +134,64 @@
 *::before,
 *::after {
 	box-sizing: border-box;
+	margin: 0;
+}
+
+/*
+ * Tailwind v4's preflight resets list-style to none, which strips the markers
+ * from every <ol> and <ul> in the app. The help dialog is the only place this
+ * project uses them, and losing the marker loses the distinction between an
+ * ordered step list and an unordered set - so it is restored centrally, where
+ * a future global reset cannot quietly remove it again.
+ */
+ol,
+ul {
+	list-style: revert;
 }
 
 html,
 body {
+	padding: 0;
 	background-color: var(--bg-page);
 	color: var(--text-primary);
-	-webkit-text-size-adjust: 100%;
-}
-
-body {
-	margin: 0;
 	font-family:
-		system-ui,
+		'Inter Variable',
 		-apple-system,
+		BlinkMacSystemFont,
 		'Segoe UI',
 		Roboto,
-		'Helvetica Neue',
-		Arial,
 		sans-serif;
-	font-size: 14px;
+	/*
+	 * Deliberately no font-size here.
+	 *
+	 * The previous version set 14px on html, which makes 1rem 14px. Every
+	 * rem-based value in the reference is calibrated against a 16px root, so
+	 * that single line rendered the whole design 12.5% too small: the card came
+	 * out at 455px instead of 520px, the button label at 11.2px instead of
+	 * 12.8px, its padding at 7.7px instead of 8.8px.
+	 *
+	 * Leaving the root unset also means a user who has raised their browser's
+	 * default font size still gets a proportionally larger UI, which is the
+	 * reference's behaviour and the accessible one.
+	 */
 	line-height: 1.5;
 	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-	background-color: var(--primary-soft);
+	background-color: var(--selection-color);
 }
 
 :focus-visible {
 	outline: 2px solid var(--primary);
 	outline-offset: 2px;
-	border-radius: 3px;
+	border-radius: 4px;
 }
 
 input,
 button,
+textarea,
 select {
 	font: inherit;
 	color: inherit;
@@ -97,7 +212,7 @@ button:disabled {
 	margin: -1px;
 	padding: 0;
 	overflow: hidden;
-	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
 	white-space: nowrap;
 	border: 0;
 }
