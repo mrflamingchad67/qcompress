@@ -142,9 +142,14 @@ jobs:
         run: bun run test:resource-limits
 
       # Image replacement splices every edit in one pass instead of rebuilding
-      # the document string per image, which allocated ~191 MB on a 33-image
-      # file. A performance change to a path that rewrites stream lengths is
-      # high risk, so the assertion that matters is that replacing images one at
+      # the document string per image. That churned ~191 MB of cumulative
+      # allocation on a 33-image file; note it did NOT lower the peak, because
+      # each flattening was collected as the next was produced. `bun run
+      # heap:images` measures retained rss at 5.2 MB vs 4.4 MB for the two
+      # implementations and concludes the measurable win is time - 21.2 ms ->
+      # 5.6 ms, 3.8x. A performance change to a path that rewrites stream
+      # lengths is high risk, so the assertion that matters is that replacing
+      # images one at
       # a time gives byte-identical output to replacing them all at once.
       - name: Verify batched image replacement matches incremental replacement
         run: bun run test:image-replacements
