@@ -295,7 +295,7 @@ pixel reaching the resizer came from a JPEG decoder, which always yields alpha
 | P9 | Memory and performance optimisation | Remaining redundancy and buffer use, guided by measured cost | **Done** — `fdc844c`; the parser rewrite and no-recompress-flate candidates were measured and rejected |
 | P10 | Browser compatibility | Upload, WASM loading, progress, cancellation, download across supported browsers | **In progress** — 3 engines green, phone sizes green; no version floor, Safari unverified |
 | P11 | Privacy and UX hardening | Local-only handling, honest errors, clear loss warnings, accessibility, no-savings cases | **Done** — accessibility asserted in 3 engines; no real screen-reader run yet |
-| P12 | CI and release gate | Structural, fidelity, text, browser and build checks before release | Reproducible quality checks for future changes |
+| P12 | CI and release gate | Structural, fidelity, text, browser and build checks before release | **In progress** — `ci.yml` runs on pull requests and adds the 5 suites deploy.yml never ran; unvalidated on GitHub until a PR runs it |
 | P13 | Stable release | Document limitations, supported browsers, privacy, signature behaviour | **Done** — MIT, CHANGELOG, SECURITY, CONTRIBUTING, browser policy; Safari still unverified |
 
 ## 4. Project rules

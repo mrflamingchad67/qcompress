@@ -1,0 +1,211 @@
+name: CI
+
+# The release gate.
+#
+# WHY A SEPARATE WORKFLOW FROM deploy.yml
+#
+# deploy.yml verifies fourteen suites and then publishes. That gate is real,
+# but it only runs on push to `main` - so a pull request got *no* checks at all.
+# Nothing was verified until after the branch had already merged and the deploy
+# had already begun. This workflow runs on pull requests, so a defect is caught
+# before the merge rather than during the release it caused.
+#
+# deploy.yml is deliberately left alone. It gates its own publish on fast checks
+# and should stay fast; the expensive, browser-backed suites live here, where
+# they run against every proposal rather than once per merge.
+#
+# WHAT IS NOT HERE
+#
+# test:live. It fetches the deployed site. Running it on every pull request
+# would mean unrelated changes probing production, which is neither useful nor
+# safe. Run it deliberately, against a deployment you intend to check.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push supersedes the previous run rather than queueing behind it. Two
+# CI runs racing to report on the same commit is noise, not signal.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that needs no browser. Fast, and on the critical path.
+  verify:
+    name: verify (no browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache bun and installed packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run check
+
+      # The engine's own account of what it did. If this fails, everything
+      # downstream is measuring nothing.
+      - name: Verify the engine still compresses
+        run: bun run test:engine
+
+      # What runs at all, and in what order. A pipeline that quietly skips a
+      # candidate would leave every assertion below vacuously true.
+      - name: Verify the pipeline
+        run: bun run test:pipeline
+
+      # Catches the class of defect that passes every structural check:
+      # deduplication blanking a page while the file stays valid.
+      - name: Verify structural and semantic preservation
+        run: bun run test:integrity
+
+      # Proves the semantic structure comparison can actually fail. It was once
+      # dead code: an early return left the whole per-page block unreachable, so
+      # annotations, link targets and page geometry were never compared.
+      - name: Verify the structure comparison detects damage
+        run: bun run test:structure-control
+
+      # Fidelity compares raster output against a baseline. It needs no browser
+      # because the rasters are fixtures, not live renders - verified by running
+      # it with PLAYWRIGHT_BROWSERS_PATH pointed at an empty directory, where it
+      # still passes 56. Do not "fix" this by adding a browser.
+      - name: Verify visual fidelity of the encoding
+        run: bun run test:fidelity
+
+      # Proves the fidelity comparison can actually fail, including for images
+      # compared against a downscaled original. A check that cannot fail is
+      # not a check.
+      - name: Verify the fidelity comparison detects damage
+        run: bun run test:fidelity-control
+
+      # The comparator behind the visual suite. If the detector ever stops
+      # detecting, the rendered-page suite below would go green while proving
+      # nothing.
+      - name: Verify the visual comparator and its negative controls
+        run: bun run test:visual-comparator
+
+      # The text-layer extractor and its negative controls. Same reasoning.
+      - name: Verify the text-layer extractor and its negative controls
+        run: bun run test:text-extract
+
+      # Catches text loss that passes every structural and visual check.
+      - name: Verify text-layer preservation
+        run: bun run test:text-integrity
+
+      # The Unicode layer. The text suite compares font-encoded bytes, which for
+      # a Type0 / Identity-H font are CIDs that mean nothing without the
+      # /ToUnicode CMap - so a compressor that destroyed every mapping in a
+      # document would pass everything above while leaving search, copy-paste
+      # and screen readers with nothing.
+      - name: Verify the /ToUnicode CMap parser
+        run: bun run test:cmap
+
+      - name: Verify /ToUnicode mappings survive compression
+        run: bun run test:unicode-integrity
+
+      - name: Verify extracted characters survive compression
+        run: bun run test:unicode-extraction
+
+      # Proves the object indexer handles the body forms real documents use. It
+      # once lost 80 of 197 objects on a real 10-page file, including all 16 of
+      # its /ToUnicode maps, because it searched forward for the next `<<` past
+      # objects whose body is a bare string or array. No suite noticed: across
+      # the 40 fixtures that existed then, those forms occurred zero times, so
+      # the failing path was unreachable rather than merely untested.
+      - name: Verify the parser against real document forms
+        run: bun run test:parser-realism
+
+      # Flate expands by ~1032:1. An inflate with no ceiling allocated the whole
+      # decoded payload before any check could run: a 100 KB stream produced
+      # 100 MB and +156 MB of heap, and qpdf accepted the file. That is an
+      # allocation failure rather than a catchable error, so it takes the worker
+      # down instead of failing a candidate.
+      - name: Verify resource limits refuse a decompression bomb
+        run: bun run test:resource-limits
+
+      # Image replacement splices every edit in one pass instead of rebuilding
+      # the document string per image, which allocated ~191 MB on a 33-image
+      # file. A performance change to a path that rewrites stream lengths is
+      # high risk, so the assertion that matters is that replacing images one at
+      # a time gives byte-identical output to replacing them all at once.
+      - name: Verify batched image replacement matches incremental replacement
+        run: bun run test:image-replacements
+
+  # ---------------------------------------------------------------------------
+  # Everything that needs a real browser. Slower, and where the accessibility
+  # and compatibility guarantees are actually established.
+  browser:
+    name: browser (Chromium, Firefox, WebKit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache bun and installed packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-pw-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # All three engines, not just Chromium. They share no engine and each has
+      # taken a different part of this build down before. WebKit in particular is
+      # not Safari and must not be reported as if it were - see README.
+      #
+      # --with-deps installs the shared libraries the browsers link against. On
+      # ubuntu-latest they are usually present already, but installing them
+      # makes the run independent of the runner image.
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium firefox webkit
+
+      # 168 page comparisons, original against compressed, each rendered in a
+      # real browser. Needs Chromium only, so it runs before the three-engine
+      # suites rather than inside them.
+      - name: Verify rendered pages are preserved
+        run: bun run test:visual
+
+      # 92 assertions per engine, 276 total, each engine required to pass.
+      # Covers both WASM modules loading, the worker, DecompressionStream, and a
+      # stream that must be cancelled - the parts that decide whether a PDF can
+      # be compressed at all. Also the only place accessibility is established:
+      # live regions, the alert, focus after a state change, completion being
+      # announced, and the spinner stopping under prefers-reduced-motion.
+      - name: Verify the interface in every engine
+        run: bun run test:browser
+
+      # Phone sizes in all three engines: overflow, 44 px tap targets, upload.
+      - name: Verify the interface at phone sizes
+        run: bun run test:mobile
