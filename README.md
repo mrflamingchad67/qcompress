@@ -330,7 +330,7 @@ same fixtures, and it made **5 of 8 files larger**.
 | `bun run test:text-extract` | Text extractor grammar + comparator controls | 47 passed |
 | `bun run test:text-integrity` | **168 page comparisons**, text payload per mode, through the real pipeline | 130 passed |
 | `bun run test:cmap` | `/ToUnicode` CMap parser: codespacerange, `bfchar`, both `bfrange` forms | 45 passed |
-| `bun run test:parser-realism` | Object indexer vs. the body forms real documents use. Runs on raw bytes | 53 passed |
+| `bun run test:parser-realism` | Object indexer vs. the body forms real documents use. Runs on raw bytes | 56 passed |
 | `bun run test:resource-limits` | A decompression bomb is refused, never honoured | 11 passed |
 | `bun run test:unicode-integrity` | Every `/ToUnicode` mapping survives compression unchanged | 131 passed — 9 CMaps, 102 mappings |
 | `bun run test:unicode-extraction` | The characters each page renders as, per mode | 128 passed — 12 pages, 117 characters |
